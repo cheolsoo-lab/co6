@@ -264,7 +264,8 @@ def watch_line(w: Dict) -> str:
     vol_txt = f" · 거래량 {vol:.1f}배" + (" ↑" if vol and vol >= 1.2 else "") if vol else ""
     hot = ('<div class="hot">🔥 지금 경계를 넘는 중 — 이 봉이 경계 밖에서 마감하면(거래량 1.5배 이상) 추천으로 올라와요</div>'
            if w.get("crossing") else "")
-    return (f'<div class="watch"><b>{html.escape(name)}</b> {what}<br>'
+    chk = "✓ Bitget 선물" if w.get("perp_ok") else ("Bitget 선물" if w.get("perp_symbol") else "⚠ 선물 미확인")
+    return (f'<div class="watch"><b>{html.escape(name)}</b> <span class="k">({chk})</span> {what}<br>'
             f'<span class="k">경계 {fmt_price(w["trigger"] * m)} · 현재가 {fmt_price(w["price"] * m)} · '
             f'남은 거리 {w["dist_atr"]:.1f} ATR{vol_txt} · 박스 {html.escape(w.get("touches", ""))}</span>{hot}</div>')
 

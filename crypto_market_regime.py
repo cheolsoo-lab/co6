@@ -40,7 +40,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-09-30 v22"                     # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-09-30 v23"                     # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -1453,7 +1453,7 @@ def detect_box(df: pd.DataFrame, a: float, lookback: int = 60, min_height_atr: f
 _REJECTS: Dict[str, int] = {}
 REJECT_LABELS = {
     "not_perp": "Bitget 선물 미지원", "data_short": "데이터 부족", "error": "조회/분석 오류",
-    "no_impulse": "최근 임펄스 없음", "weak_rs": "상대강도 방향 불일치", "no_room": "목표까지 여유 없음", "macro_against": "거시 흐름과 반대 방향", "no_st_flip": "추적선 전환 없음",
+    "no_impulse": "최근 임펄스 없음", "weak_rs": "상대강도 방향 불일치", "no_room": "목표까지 여유 없음", "perp_untradable": "Bitget 선물 거래 불가(시세 없음)", "macro_against": "거시 흐름과 반대 방향", "no_st_flip": "추적선 전환 없음",
     "invalid_price": "이미 손절선을 넘음(무효)", "target_reached": "이미 목표가 도달(놓침)",
     "no_box": "유효한 박스 아님", "lean_against": "횡보 기울기와 반대", "mid_box": "박스 중간(관망)",
     "htf_against": "일봉 추세와 반대", "wide_spread": "스프레드 넓음", "funding_hot": "펀딩비 과열",
@@ -1935,16 +1935,81 @@ def _is_excluded_symbol(symbol: str) -> bool:
     return base in _EXCLUDED_BASES or base.endswith(("3L", "3S", "5L", "5S"))
 
 
+PERPS_CACHE_FILE = "bitget_perps_cache.json"
+PERPS_SOURCE = "none"   # live(방금 조회) / cache(조회 실패 → 최근 저장본) / none(확인 불가)
+_BAD_PERP_STATUS = {"off", "offline", "maintain", "restrictedapi", "limit_open", "delisted", "suspend", "halt"}
+
+
+def _perp_tradable(m: Dict) -> bool:
+    """정상 거래 가능한 USDT 무기한 선물인지 (상장 폐지·거래 중지·청산만 가능 상태 제외)."""
+    if not (m.get("swap") and m.get("linear") and m.get("quote") == QUOTE) or m.get("active") is False:
+        return False
+    info = m.get("info") or {}
+    for key in ("symbolStatus", "status", "symbolType"):
+        v = str(info.get(key, "")).strip().lower()
+        if v in _BAD_PERP_STATUS:
+            return False
+    off = info.get("offTime") or info.get("deliveryTime")
+    try:
+        if off and str(off) not in ("-1", "0", "") and int(off) <= int(utc_now().timestamp() * 1000):
+            return False   # 이미 내려간(만기·폐지) 선물
+    except Exception:
+        pass
+    return True
+
+
 def bitget_perp_symbols() -> set:
-    """Bitget USDT-M 무기한 선물 심볼 집합(예: 'SOL/USDT:USDT'). 조회 실패 시 빈 집합."""
+    """Bitget USDT-M 무기한 선물 중 정상 거래 가능한 심볼 집합(예: 'SOL/USDT:USDT').
+    조회에 성공하면 파일로 저장하고, 실패하면 7일 이내 저장본을 씀. 둘 다 없으면 빈 집합(PERPS_SOURCE='none')."""
+    global PERPS_SOURCE
     try:
         ex = _get_ex("bitget")
         ex.load_markets()
-        return {m["symbol"] for m in ex.markets.values()
-                if m.get("swap") and m.get("linear") and m.get("active") is not False and m.get("quote") == QUOTE}
+        perps = {m["symbol"] for m in ex.markets.values() if _perp_tradable(m)}
+        if perps:
+            PERPS_SOURCE = "live"
+            try:
+                with open(PERPS_CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"saved": str(utc_now()), "perps": sorted(perps)}, f)
+            except Exception:
+                pass
+            return perps
     except Exception as e:
         print(f"[warn] Bitget 선물 목록 조회 실패: {e}")
+    try:
+        with open(PERPS_CACHE_FILE, encoding="utf-8") as f:
+            c = json.load(f)
+        if utc_now() - pd.Timestamp(c["saved"]) <= pd.Timedelta("7D") and c.get("perps"):
+            PERPS_SOURCE = "cache"
+            print("[warn] Bitget 선물 목록 조회 실패 → 최근 저장본 사용")
+            return set(c["perps"])
+    except Exception:
+        pass
+    PERPS_SOURCE = "none"
+    return set()
+
+
+def verify_bitget_tradable(perp_symbols: List[str]) -> Optional[set]:
+    """화면에 내보내기 직전 확인: Bitget 선물 시세를 한 번에 조회해 실제 가격·거래량이 있는 심볼만 반환.
+    조회 자체가 실패하면 None(확인 못 함 → 거르지 않음)."""
+    syms = sorted({p for p in perp_symbols if p})
+    if not syms:
         return set()
+    try:
+        ex = _get_ex("bitget")
+        try:
+            tk = ex.fetch_tickers(syms)
+        except Exception:
+            tk = ex.fetch_tickers(syms, params={"productType": "USDT-FUTURES"})
+        ok = set()
+        for sym in syms:
+            t = tk.get(sym) or {}
+            if (t.get("last") or t.get("close")) and (t.get("quoteVolume") or t.get("baseVolume") or 0) > 0:
+                ok.add(sym)
+        return ok
+    except Exception as e:
+        print(f"[warn] Bitget 선물 시세 확인 실패: {e}")
+        return None
 
 
 _PERP_MULTS = (1, 1000, 10000, 1000000)
@@ -2176,7 +2241,7 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
         btc_df, _ = split_live(fetch_btc_df())
     perps = bitget_perp_symbols() if BITGET_ONLY else set()
     if BITGET_ONLY and not perps:
-        print("[warn] Bitget 선물 목록을 못 가져와 '선물 거래 가능 여부' 필터를 건너뜁니다.")
+        print("[warn] Bitget 선물 목록을 못 가져와 '선물 거래 가능 여부'를 확인하지 못했어요.")
     universe = build_universe(TOP_N_BY_VOLUME, perps or None)
     fund_ex = "bitget" if perps else None
     breadth = {"uptrend": 0, "downtrend": 0, "sideways": 0, "n": 0}
@@ -2292,10 +2357,29 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
             _rej("low_rr")
     passed.sort(key=lambda x: x.rr_ratio, reverse=True)
 
+    # 화면에 내보내기 직전: Bitget 선물 시세로 실제 거래 가능 여부 최종 확인 (상장 폐지·거래 중지 코인 제거)
+    perp_verified = None
+    if BITGET_ONLY and perps:
+        targets = [x.perp_symbol for x in passed] + [w.get("perp_symbol", "") for w in watch]
+        ok = verify_bitget_tradable(targets)
+        if ok is not None:
+            perp_verified = True
+            dropped = [x for x in passed if x.perp_symbol and x.perp_symbol not in ok]
+            dropped_w = [w for w in watch if w.get("perp_symbol") and w["perp_symbol"] not in ok]
+            if dropped or dropped_w:
+                _REJECTS["perp_untradable"] = len(dropped) + len(dropped_w)
+                print(f"[skip] Bitget 선물 시세 없음(거래 불가): {[x.symbol for x in dropped] + [w['symbol'] for w in dropped_w]}")
+            passed = [x for x in passed if x not in dropped]
+            watch = [w for w in watch if w not in dropped_w]
+            for w in watch:
+                w["perp_ok"] = True
+        else:
+            perp_verified = False
     LAST_SCAN_STATS.clear()
     LAST_SCAN_STATS.update({"universe_diag": dict(UNIVERSE_DIAG), "rejects": dict(_REJECTS), "breadth": dict(breadth),
                             "universe": n_items, "passed": len(passed), "alt_index": alt is not None,
-                            "watchlist": sorted(watch, key=lambda w: w["dist_atr"])})
+                            "watchlist": sorted(watch, key=lambda w: w["dist_atr"]),
+                            "perp_source": PERPS_SOURCE if BITGET_ONLY else "off", "perp_verified": perp_verified})
     LAST_LOADED.clear()
     LAST_LOADED.update({sym: (info["src"], d) for sym, info, d, _ in loaded})
     summary = ", ".join(f"{REJECT_LABELS.get(k, k)} {v}" for k, v in sorted(_REJECTS.items(), key=lambda kv: -kv[1]))

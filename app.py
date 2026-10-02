@@ -33,7 +33,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="--", page_icon="--", layout="centered",
+st.set_page_config(page_title="--", page_icon="-", layout="centered",
                    initial_sidebar_state="collapsed")
 st.markdown(f"<style>{L.CSS}</style>", unsafe_allow_html=True)
 
@@ -61,7 +61,7 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-09-30 v22"
+APP_VERSION = "2026-09-30 v23"
 st.title("--")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
@@ -518,6 +518,12 @@ def recommendations() -> None:
         st.rerun()
     live_refresh_if_due()
     r = store["result"]
+    fs_ = r.get("filter_stats") or {}
+    if fs_.get("perp_source") == "none":
+        st.warning("⚠️ Bitget 선물 목록을 받지 못해 선물 거래 가능 여부를 확인하지 못했어요. 이번 추천·돌파 임박 코인은 "
+                   "Bitget에 있는지 직접 확인하세요. 다음 분석 때 자동으로 다시 시도해요.")
+    elif fs_.get("perp_source") == "cache":
+        st.caption("ⓘ Bitget 선물 목록 조회가 일시적으로 실패해 최근 저장본(7일 이내)으로 걸렀어요.")
     mf_ = r.get("macro_filter") or {}
     if mf_.get("blocked_side"):
         st.info(f"🧭 거시 필터: 일봉 흐름 점수 {mf_['score']:+.2f} → {mf_['blocked_side']} 신호 제외 중"
