@@ -40,7 +40,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-09-30 v23"                     # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-09-30 v25"                     # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -85,6 +85,8 @@ MACRO_FILTER = True                               # 거시 흐름과 반대 방�
 ELAPSED_WARN_H, ELAPSED_STOP_H = 2, 4             # 신호 봉 마감 후 경과 시간 경고 (시간)
 # 코인 그룹 (2년 검증): BTC는 어떤 차트 규칙도 엣지가 없어 매매 신호에서 제외(거시 지표로만),
 # 메이저는 추세가 잘 이어져 신고점 돌파·일봉 추세 포트폴리오가 통하고, 일반 알트는 박스 돌파가 가장 강함
+BOX_RR_MAX = 5.0     # 박스 돌파: 봉 마감 가격 기준 손익비 5 이상은 제외 (2년·두 데이터 모두 개발·확인 구간 마이너스 —
+                     # 박스가 손절폭보다 지나치게 넓어, 단단한 박스가 아니라 넓게 출렁인 구간인 경우가 많음)
 LIQ_CAP_PCT = 0.10   # 주문 금액 상한 = 그 코인 24시간 거래대금의 0.1% (계좌가 커질 때 체결 비용이 검증 가정을 넘지 않게)
 MAJORS = {"ETH", "XRP", "BNB", "SOL", "DOGE", "ADA", "TRX", "LINK", "AVAX", "BCH", "LTC", "DOT", "XLM", "SUI", "HBAR", "TON"}
 
@@ -136,8 +138,8 @@ class RiskConfig:
     account_balance: float          # 계좌 총 잔고 (USDT 기준)
     risk_per_trade_pct: float = 1.0  # 트레이드 1건당 허용 손실 (계좌 대비 %). 권장 0.5~2%
     max_correlated_exposure_pct: float = 3.0  # BTC 방향에 동조된 포지션들의 합산 리스크 상한(%)
-    max_concurrent_setups: int = 10  # 같은 방향(롱 또는 숏) 동시 보유 최대 개수
-    max_total_risk_pct: float = 5.0  # 동시에 들고 있는 모든 포지션의 손절 시 합산 손실 상한(계좌 대비 %)
+    max_concurrent_setups: int = 12  # 같은 방향(롱 또는 숏) 동시 보유 최대 개수
+    max_total_risk_pct: float = 12.0  # 동시에 들고 있는 모든 포지션의 손절 시 합산 손실 상한(계좌 대비 %)
     open_positions: int = 0          # 지금 거래소에서 이미 보유 중인 포지션 수(직접 입력 — 프로그램은 계좌를 모름)
 
 
@@ -1453,7 +1455,7 @@ def detect_box(df: pd.DataFrame, a: float, lookback: int = 60, min_height_atr: f
 _REJECTS: Dict[str, int] = {}
 REJECT_LABELS = {
     "not_perp": "Bitget 선물 미지원", "data_short": "데이터 부족", "error": "조회/분석 오류",
-    "no_impulse": "최근 임펄스 없음", "weak_rs": "상대강도 방향 불일치", "no_room": "목표까지 여유 없음", "perp_untradable": "Bitget 선물 거래 불가(시세 없음)", "macro_against": "거시 흐름과 반대 방향", "no_st_flip": "추적선 전환 없음",
+    "no_impulse": "최근 임펄스 없음", "weak_rs": "상대강도 방향 불일치", "no_room": "목표까지 여유 없음", "rr_too_far": "목표가 너무 멂(손익비 5 이상 · 넓게 출렁인 박스)", "perp_untradable": "Bitget 선물 거래 불가(시세 없음)", "macro_against": "거시 흐름과 반대 방향", "no_st_flip": "추적선 전환 없음",
     "invalid_price": "이미 손절선을 넘음(무효)", "target_reached": "이미 목표가 도달(놓침)",
     "no_box": "유효한 박스 아님", "lean_against": "횡보 기울기와 반대", "mid_box": "박스 중간(관망)",
     "htf_against": "일봉 추세와 반대", "wide_spread": "스프레드 넓음", "funding_hot": "펀딩비 과열",
@@ -2351,6 +2353,9 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
         if SETUP_FAMILY.get(x.bias) in ("신고점 돌파", "추적선 전환") or \
                 x.rr_ratio >= (1.3 if (x.poc_confluence or x.sweep_confluence) else 1.5):
             apply_breakout_entry(x)
+            if x.bias.startswith("wait_breakout") and x.rr_ratio >= BOX_RR_MAX:
+                _rej("rr_too_far")
+                continue
             x.market_entry = x.bias.startswith("donchian") or "즉시 진입" in x.entry_note
             passed.append(x)
         else:
@@ -2390,12 +2395,158 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
 ACTIVE_TRACK = ("대기", "보유")
 
 
+# ==========================================================================
+# 클라우드 영구 저장 (GitHub Gist): Streamlit Cloud는 재시작하면 파일이 지워져서 실전 추적·연구실 설정이 초기화됨
+# → 비공개 Gist에 저장했다가 시작할 때 불러옴. 토큰·Gist ID는 Streamlit Secrets에만 둠(코드·GitHub에 올리지 않기)
+# ==========================================================================
+CLOUD = {"token": None, "gist": None, "enabled": False, "last_sync": None, "last_error": None,
+         "hashes": {}, "remote_hashes": {}, "last_try": 0.0, "restored": None}
+_TRACK_RANK = {"대기": 0, "chase": 0, "보유": 1, "종료": 2, "미체결": 2}
+
+
+def cloud_files() -> List[str]:
+    return [TRACK_FILE, LAB_REF_FILE, LAB_CONFIG_FILE, MACRO_VAL_FILE, TRADE_LOG_FILE, HISTORY_FILE]
+
+
+def configure_cloud_store(token: Optional[str], gist_id: Optional[str]) -> None:
+    tok, gid = (token or "").strip() or None, (gist_id or "").strip() or None
+    if tok != CLOUD["token"] or gid != CLOUD["gist"]:
+        CLOUD.update(token=tok, gist=gid, hashes={}, remote_hashes={})
+    CLOUD["enabled"] = bool(tok and gid)
+
+
+def _gist_req(method: str, payload: Optional[Dict] = None) -> Dict:
+    r = requests.request(method, f"https://api.github.com/gists/{CLOUD['gist']}", json=payload, timeout=20,
+                         headers={"Authorization": f"Bearer {CLOUD['token']}", "Accept": "application/vnd.github+json",
+                                  "X-GitHub-Api-Version": "2022-11-28"})
+    if r.status_code >= 400:
+        raise RuntimeError(f"GitHub {r.status_code}: {r.text[:120]}")
+    return r.json()
+
+
+def _gist_files() -> Dict[str, str]:
+    out = {}
+    for name, f in (_gist_req("GET").get("files") or {}).items():
+        content = f.get("content") or ""
+        if f.get("truncated") and f.get("raw_url"):
+            content = requests.get(f["raw_url"], timeout=20, headers={"Authorization": f"Bearer {CLOUD['token']}"}).text
+        out[name] = content
+    return out
+
+
+def _sha(text: str) -> str:
+    import hashlib
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _merge_tracks(local_txt: str, remote_txt: str) -> str:
+    """두 곳(예: PC 앱·클라우드 앱)의 실전 추적 기록 합치기: 같은 신호는 더 진행된 상태(종료 > 보유 > 대기)를 남김."""
+    def _load(t):
+        try:
+            v = json.loads(t) if t and t.strip() else []
+            return v if isinstance(v, list) else []
+        except Exception:
+            return []
+    merged: Dict[str, Dict] = {}
+    for t in _load(remote_txt) + _load(local_txt):
+        k = t.get("key")
+        if k is None:
+            continue
+        cur = merged.get(k)
+        if cur is None or _TRACK_RANK.get(t.get("status"), 0) >= _TRACK_RANK.get(cur.get("status"), 0):
+            merged[k] = t
+    return json.dumps(sorted(merged.values(), key=lambda t: str(t.get("created", ""))), ensure_ascii=False)
+
+
+def cloud_restore() -> str:
+    """시작할 때 Gist의 기록을 내려받음. 실전 추적은 합치고, 나머지는 이 컴퓨터에 파일이 없을 때만 받음."""
+    if not CLOUD["enabled"]:
+        return "off"
+    try:
+        files = _gist_files()
+        n = 0
+        for path in cloud_files():
+            name = os.path.basename(path)
+            remote = files.get(name, "")
+            if not remote.strip():
+                continue
+            CLOUD["remote_hashes"][name] = _sha(remote)
+            local = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+            if path == TRACK_FILE and local.strip():
+                text = _merge_tracks(local, remote)
+            elif local.strip():
+                CLOUD["hashes"][path] = None          # 이 컴퓨터 파일 유지 → 다음 저장 때 올림
+                continue
+            else:
+                text = remote
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            CLOUD["hashes"][path] = _sha(text) if text == remote else None
+            n += 1
+        CLOUD["restored"], CLOUD["last_error"] = utc_now(), None
+        return f"불러옴 {n}개"
+    except Exception as e:
+        CLOUD["last_error"] = str(e)[:150]
+        return "error"
+
+
+def cloud_sync(force: bool = False, min_interval: float = 60.0) -> str:
+    """바뀐 기록 파일만 Gist에 올림(최대 1분에 한 번). 실전 추적은 올리기 전에 Gist 쪽 기록과 합침."""
+    if not CLOUD["enabled"]:
+        return "off"
+    now = time.time()
+    if not force and now - CLOUD["last_try"] < min_interval:
+        return "skip"
+    CLOUD["last_try"] = now
+    changed = {}
+    for path in cloud_files():
+        if os.path.exists(path):
+            text = open(path, encoding="utf-8").read()
+            if text.strip() and CLOUD["hashes"].get(path) != _sha(text):
+                changed[path] = text
+    if not changed:
+        return "same"
+    try:
+        tname = os.path.basename(TRACK_FILE)
+        if TRACK_FILE in changed:
+            remote = _gist_files().get(tname, "")
+            if remote.strip() and CLOUD["remote_hashes"].get(tname) != _sha(remote):
+                merged = _merge_tracks(changed[TRACK_FILE], remote)
+                with open(TRACK_FILE, "w", encoding="utf-8") as f:
+                    f.write(merged)
+                changed[TRACK_FILE] = merged
+        _gist_req("PATCH", {"files": {os.path.basename(p): {"content": t} for p, t in changed.items()}})
+        for p, t in changed.items():
+            CLOUD["hashes"][p] = _sha(t)
+            CLOUD["remote_hashes"][os.path.basename(p)] = _sha(t)
+        CLOUD["last_sync"], CLOUD["last_error"] = utc_now(), None
+        return f"저장 {len(changed)}개"
+    except Exception as e:
+        CLOUD["last_error"] = str(e)[:150]
+        return "error"
+
+
 def load_tracks() -> List[Dict]:
+    """실전 추적 기록 읽기. 다른 버전·다른 기기에서 합쳐진 기록에 항목이 빠져 있어도 앱이 멈추지 않게 정리."""
     try:
         with open(TRACK_FILE, encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
     except Exception:
         return []
+    out = []
+    for t in raw if isinstance(raw, list) else []:
+        # 가격·시각이 없는 기록은 성과를 계산할 수 없어 버림 (깨진 기록·형식이 다른 기록)
+        if not isinstance(t, dict) or any(t.get(k) in (None, "") for k in ("key", "symbol", "signal_ts", "entry", "sl", "tp1")):
+            continue
+        t.setdefault("bias", "wait_breakout_long" if t.get("direction") == "long" else "wait_breakout_short")
+        t.setdefault("family", SETUP_FAMILY.get(t["bias"], "돌파"))
+        t.setdefault("direction", "long" if t["bias"] in LONG_BIASES else "short")
+        for k, v in (("status", "대기"), ("R", None), ("created", ""), ("exchange", "bitget"), ("atr", None),
+                     ("is_chase", False), ("market", False), ("tags", []), ("tier", "")):
+            t.setdefault(k, v)
+        t.setdefault("group", coin_group(t["symbol"]))
+        out.append(t)
+    return out
 
 
 def _save_tracks(tracks: List[Dict]) -> None:
@@ -3437,7 +3588,10 @@ def run_strategy_lab(n_coins: int = 30, days: int = 730, progress_cb=None) -> Di
         sig = generate_signals(df, c["btc"], c["htf"], warmup=data["warmup"], alt_df=alt_al, families={"돌파"})
         dsig = generate_donchian_signals(df, c["btc"], c["htf"], alt_al, warmup=data["warmup"]) \
             if coin_group(c["sym"]) == "메이저" else {}   # 신고점 돌파는 메이저 전용
-        runs = {"base": simulate_exits(df, sig, "partial_trail", entry_mode="immediate", slip_pct=slip),
+        closes_ = df["close"].to_numpy()
+        sig_b = {i: x for i, x in sig.items()
+                 if abs(closes_[i] - x["sl"]) > 0 and abs(x["tp1"] - closes_[i]) / abs(closes_[i] - x["sl"]) < BOX_RR_MAX}
+        runs = {"base": simulate_exits(df, sig_b, "partial_trail", entry_mode="immediate", slip_pct=slip),
                 **{key: simulate_exits(df, donchian_variant_signals(dsig, var), "partial_trail", slip_pct=slip)
                    for key, var in DON_KEYS.items()}}
         for key, tr in runs.items():

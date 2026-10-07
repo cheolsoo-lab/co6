@@ -33,7 +33,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="--", page_icon="-", layout="centered",
+st.set_page_config(page_title="--", page_icon="▲", layout="centered",
                    initial_sidebar_state="collapsed")
 st.markdown(f"<style>{L.CSS}</style>", unsafe_allow_html=True)
 
@@ -61,8 +61,8 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-09-30 v23"
-st.title("--")
+APP_VERSION = "2026-09-30 v25"
+st.title("▲--")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
 if _engine_ver != APP_VERSION:
@@ -90,6 +90,19 @@ if _engine_ver != APP_VERSION:
             f"엔진 파일 크기: {os.path.getsize(_path) if os.path.exists(_path) else 0:,} 바이트", language=None)
     st.stop()
 
+# 클라우드 영구 저장(GitHub Gist): Secrets에 GITHUB_TOKEN·GIST_ID가 있으면 시작할 때 불러오고, 바뀌면 저장
+try:
+    _gh_tok, _gh_gist = st.secrets.get("GITHUB_TOKEN", ""), st.secrets.get("GIST_ID", "")
+except Exception:
+    _gh_tok, _gh_gist = "", ""
+cmr.configure_cloud_store(_gh_tok, _gh_gist)
+if cmr.CLOUD["enabled"] and cmr.CLOUD["restored"] is None:
+    with store["lock"]:
+        store["cloud_msg"] = cmr.cloud_restore()
+        store["lab_cfg_loaded"] = False   # 내려받은 연구실 설정을 다시 읽도록
+else:
+    cmr.cloud_sync()
+
 # 전략 연구실에서 적용한 설정 불러오기 (저장 파일 → 한 번만), 매 실행마다 엔진에 반영
 if not store["lab_cfg_loaded"]:
     store["lab_cfg"] = cmr.load_lab_config()
@@ -108,12 +121,12 @@ with st.expander("⚙️ 설정"):
     risk_pct = c2.number_input("트레이드당 리스크 (%)", min_value=0.1, max_value=3.0, value=1.0, step=0.1,
                                key="risk_pct", help="손절가에 닿았을 때 잃는 금액이 계좌의 몇 %인지")
     c3, c4 = st.columns(2)
-    max_total = c3.number_input("총 리스크 상한 (%)", min_value=1.0, max_value=20.0, value=5.0, step=0.5,
+    max_total = c3.number_input("총 리스크 상한 (%)", min_value=1.0, max_value=20.0, value=12.0, step=0.5,
                                 key="max_total",
                                 help="동시에 들고 있는 모든 포지션이 한꺼번에 손절될 때 잃는 합계 상한")
     open_pos = c4.number_input("지금 보유 중인 포지션 수", min_value=0, max_value=30, value=0, step=1,
                                key="open_pos", help="프로그램은 거래소 계좌를 볼 수 없어서 직접 입력해야 정확해요")
-    max_n = st.slider("같은 방향 동시 추천 최대 개수", 1, 15, 10, key="max_n",
+    max_n = st.slider("같은 방향 동시 추천 최대 개수", 1, 15, 12, key="max_n",
                       help="알트코인은 BTC와 같이 움직여서, 같은 방향을 많이 잡아도 분산이 잘 안 됩니다")
     c5, c6 = st.columns(2)
     top_n = c5.slider("스캔 코인 수 (3개 거래소 합산 거래량 순위)", 10, 150, 100, key="top_n",
@@ -131,6 +144,16 @@ with st.expander("⚙️ 설정"):
     port_n = len(cmr.MAJORS)
     port_alloc = st.slider("추세 포트폴리오 배분 (계좌의 %)", 10, 100, 30, step=5, key="port_alloc",
                            help="계좌 중 이 비율만 포트폴리오에 쓰고, 나머지로 신호 매매의 수량을 계산해요") if tsm_on else 0
+    _cl = cmr.CLOUD
+    if _cl["enabled"]:
+        _when = f" · 마지막 저장 {kst(_cl['last_sync'])}" if _cl.get("last_sync") is not None else ""
+        if _cl.get("last_error"):
+            st.warning(f"☁️ 기록 저장(GitHub Gist) 오류: {_cl['last_error']}")
+        else:
+            st.caption(f"☁️ 기록 저장: GitHub Gist 연결됨{_when} — 재시작해도 실전 추적·연구실 설정이 유지돼요")
+    else:
+        st.caption("⚠️ 기록 저장 안 됨: Streamlit Cloud가 재시작되면 실전 추적·연구실 설정이 초기화돼요. "
+                   "README의 'GitHub Gist 연결' 순서대로 설정하세요.")
     macro_f = st.checkbox("🧭 거시 흐름과 반대 방향 신호 제외 (2년 검증: 역방향 진입 평균 −0.43R)", value=True, key="macro_f")
     auto_def = st.checkbox("🛡 자동 방어 (실전 성과가 나빠진 신호 유형은 리스크 절반 → 계속 나쁘면 자동 중지)",
                            value=True, key="auto_def")
@@ -387,6 +410,13 @@ if page.endswith("전략 연구실"):
     st.stop()
 
 
+def _cloud_after_scan() -> None:
+    try:
+        cmr.cloud_sync(force=True)
+    except Exception:
+        pass
+
+
 def run_scan(force: bool) -> None:
     prog = st.progress(0.0, text="다른 분석이 진행 중이면 잠시 기다려요...")
 
@@ -413,6 +443,7 @@ def run_scan(force: bool) -> None:
         except Exception:
             store["error"] = traceback.format_exc()
             store["log"] = buf.getvalue()
+        _cloud_after_scan()   # 실전 추적이 갱신됐으니 바로 클라우드에 저장
     prog.empty()
 
 
