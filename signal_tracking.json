@@ -1,1 +1,1 @@
-[]
+[{"key": "FIL/USDT|wait_breakout_long|2026-10-11 20:00:00", "symbol": "FIL/USDT", "exchange": "okx", "bias": "wait_breakout_long", "family": "돌파", "direction": "long", "signal_ts": "2026-10-11 20:00:00", "entry": 1.2142, "sl": 1.1673071428571429, "tp1": 1.5574500000000002, "atr": 0.04689285714285712, "is_chase": false, "market": true, "tags": ["htf_align", "btc_strong"], "created": "2026-10-12 01:32:15.208801", "status": "대기", "R": null, "group": "일반 알트", "tier": "거래량 1~30위", "frac": 0.0, "trail": 1.0, "hold": 30, "risk_mult": 1.0}]

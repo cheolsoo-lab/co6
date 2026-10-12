@@ -33,7 +33,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="--", page_icon="▲", layout="centered",
+st.set_page_config(page_title="▲△▲", page_icon="▲△▲", layout="centered",
                    initial_sidebar_state="collapsed")
 st.markdown(f"<style>{L.CSS}</style>", unsafe_allow_html=True)
 
@@ -61,8 +61,8 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-09-30 v25"
-st.title("▲--")
+APP_VERSION = "2026-10-12 v28"
+st.title("▲△▲ ▲△▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
 if _engine_ver != APP_VERSION:
@@ -140,12 +140,27 @@ with st.expander("⚙️ 설정"):
     tsm_on = c7.checkbox("📈 추세 포트폴리오 표시", key="tsm_on",
                          help="매일 일봉 마감 후 추세가 살아있는 코인을 변동성 비중으로 보유(롱). 연구실에서 통과하면 자동으로 켜져요",
                          **_tsm_default)
-    c8.caption("포트폴리오 대상: **메이저 15개** (2년 검증에서 일반 알트는 구간마다 결과가 뒤집혀 제외)")
-    port_n = len(cmr.MAJORS)
-    port_alloc = st.slider("추세 포트폴리오 배분 (계좌의 %)", 10, 100, 30, step=5, key="port_alloc",
-                           help="계좌 중 이 비율만 포트폴리오에 쓰고, 나머지로 신호 매매의 수량을 계산해요") if tsm_on else 0
+    c8.caption("포트폴리오 대상: **메이저 + BTC** · v28 시장 관문: BTC가 100일선 위 **그리고** 대상 코인 절반 이상이 "
+               "20일선 위일 때만 보유 (2.5년 검증: 최대 낙폭 −47% → −25%)")
+    port_n = len(cmr.tsm_universe())
+    port_mode = st.radio("포트폴리오 자금", ["신호 매매에 더해서 (권장 · 신호가 메인)", "계좌를 나눠서"], horizontal=True,
+                         key="port_mode",
+                         help="더해서: 신호 매매 수량은 계좌 전체 기준 그대로, 포트폴리오는 계좌의 아래 비율만큼 추가로 보유. "
+                              "나눠서: 계좌를 둘로 나눠 신호 매매 수량이 줄어요. 신호와 합친 검증(2024.10~, 포트폴리오 20%): "
+                              "더해서 → 신호 단독보다 연 수익↑·최대 낙폭 거의 같음(−41%→−42%) / 나눠서 → 수익↓·낙폭↓(−35%)") \
+        if tsm_on else "신호 매매에 더해서"
+    port_overlay = not str(port_mode).startswith("계좌")
+    port_alloc = st.slider("추세 포트폴리오 금액 (계좌의 %)", 10, 100, 20, step=5, key="port_alloc",
+                           help="포트폴리오에 쓰는 금액. 관문이 켜지면 이 금액의 최대 100%(또는 150%)만큼 코인을 보유해요. "
+                                "신호 매매가 메인이면 20~30%를 권해요") if tsm_on else 0
+    port_gross_lbl = st.radio("포트폴리오 비중 합계 상한", ["100% (기본)", "150% (적극)"], horizontal=True, key="port_gross",
+                              help="관문이 켜졌을 때 코인들의 비중 합계 상한. 2.5년 검증: 100% → 연 +26%·낙폭 −25%, "
+                                   "150% → 연 +40%·낙폭 −35%. 실전 기록 90일 전에는 100%를 권해요") if tsm_on else "100%"
+    port_gross = 1.5 if str(port_gross_lbl).startswith("150") else 1.0
     _cl = cmr.CLOUD
-    if _cl["enabled"]:
+    if _cl.get("config_error"):
+        st.warning(f"☁️ 기록 저장 설정 확인 필요: {_cl['config_error']} (Streamlit Cloud → 앱 Settings → Secrets)")
+    elif _cl["enabled"]:
         _when = f" · 마지막 저장 {kst(_cl['last_sync'])}" if _cl.get("last_sync") is not None else ""
         if _cl.get("last_error"):
             st.warning(f"☁️ 기록 저장(GitHub Gist) 오류: {_cl['last_error']}")
@@ -158,10 +173,12 @@ with st.expander("⚙️ 설정"):
     auto_def = st.checkbox("🛡 자동 방어 (실전 성과가 나빠진 신호 유형은 리스크 절반 → 계속 나쁘면 자동 중지)",
                            value=True, key="auto_def")
     _fam_default = {} if "fams" in st.session_state else {
-        "default": ["돌파"]
+        "default": ["돌파", "돌파 후 되돌림", "위치 다이버전스"]
     }
-    fams = st.multiselect("추천할 신호 유형", ["돌파", "신고점 돌파", "추세", "박스 역매매"], key="fams",
-                          help="박스 돌파: 모든 알트(BTC 제외)에 적용, 2년 검증 기준 가장 강한 신호. "
+    fams = st.multiselect("추천할 신호 유형", ["돌파", "돌파 후 되돌림", "위치 다이버전스", "신고점 돌파", "추세", "박스 역매매"],
+                          key="fams",
+                          help="박스 돌파: 모든 알트(BTC 제외), 가장 강하고 꾸준한 신호. "
+                               "돌파 후 되돌림·위치 다이버전스: v27에서 추가(24개월 탐색·교차 검증 통과), 실전 30건 전까지 위험 절반. "
                                "신고점 돌파: 메이저 전용이고 봉 마감 후 1시간 안에 들어가야 해서 자동 매매 때 권장. "
                                "추세·박스 역매매는 근거가 약해요.", **_fam_default)
     if store["lab_cfg"]:
@@ -172,8 +189,9 @@ with st.expander("⚙️ 설정"):
             st.rerun()
 
 tf = "1h" if tf_choice.startswith("1") else "4h"
-bal_sig = balance * (1 - port_alloc / 100)   # 신호 매매에 쓰는 계좌 (포트폴리오 배분을 뺀 나머지)
-bal_port = balance * port_alloc / 100        # 추세 포트폴리오에 쓰는 계좌
+# 신호 매매가 메인: '더해서'면 신호 수량은 계좌 전체 기준 그대로, '나눠서'면 포트폴리오 금액을 뺀 나머지 기준
+bal_sig = balance if port_overlay else balance * (1 - port_alloc / 100)
+bal_port = balance * port_alloc / 100        # 추세 포트폴리오에 쓰는 금액
 risk_cfg = cmr.RiskConfig(account_balance=bal_sig, risk_per_trade_pct=risk_pct, max_concurrent_setups=max_n,
                           max_total_risk_pct=max_total, open_positions=int(open_pos))
 scan_cfg = (top_n, bitget_only, tf, tuple(sorted(fams)), cmr.lab_config_text(store["lab_cfg"] or {}), auto_def, macro_f)
@@ -240,7 +258,7 @@ def render_lab() -> None:
     st.caption("🛡 이 결과의 신호 유형별 성과가 자동 방어 기준선으로 저장됐어요. 실전 추적 성과가 이 기준 아래로 "
                "떨어지면 추천이 자동으로 감축·중지돼요.")
     cfg = lab["config"]
-    if any(r["verdict"].startswith(("✅", "🧪")) for r in lab["rows"]):
+    if any(r["verdict"].startswith(("✅", "🧪")) for r in lab["rows"] if r.get("kind") != "v27 매매법"):
         st.markdown("**추천 설정:** " + cmr.lab_config_text(cfg))
         if st.button("✔ 이 설정 적용", use_container_width=True):
             cmr.apply_lab_config(cfg)
@@ -258,14 +276,19 @@ def render_lab() -> None:
     with t3:
         tsm_ = lab.get("tsm")
         if tsm_:
-            st.caption(f"표본 코인 {len(tsm_['coins'])}개(거래량 1~60위)를 일봉으로 매일 점검 · 수수료·슬리피지·롱 펀딩비 차감 후")
-            curve = pd.DataFrame({"추세 포트폴리오": (1 + tsm_["daily"]).cumprod(),
-                                  "같은 코인 단순 보유": (1 + tsm_["ew_daily"]).cumprod()})
-            st.line_chart(curve)
+            st.caption(f"대상 {len(tsm_['coins'])}개(메이저+BTC)를 일봉으로 매일 점검 · 수수료·슬리피지·롱 펀딩비 차감 후 · "
+                       + ("v28 시장 관문 적용" if tsm_.get("gated") else "BTC 일봉이 없어 관문 없이 계산"))
+            cv = {"추세 포트폴리오(v28)": (1 + tsm_["daily"]).cumprod(), "같은 코인 단순 보유": (1 + tsm_["ew_daily"]).cumprod()}
+            if tsm_.get("old_daily") is not None:
+                cv["관문 없던 방식(v27)"] = (1 + tsm_["old_daily"]).cumprod()
+            st.line_chart(pd.DataFrame(cv))
             a_, e_ = tsm_["all"], tsm_["ew"]
-            st.markdown(f"- 추세 포트폴리오: 연 {a_['cagr']:+.0%} · 최대 낙폭 {a_['max_dd']:.0%} · 샤프 {a_['sharpe']:.2f} · "
+            o_ = tsm_.get("old") or {}
+            st.markdown(f"- 추세 포트폴리오(v28): 연 {a_['cagr']:+.0%} · 최대 낙폭 {a_['max_dd']:.0%} · 샤프 {a_['sharpe']:.2f} · "
                         f"플러스 달 {(a_.get('pos_months') or 0):.0%}\n"
-                        f"- 단순 보유: 연 {e_['cagr']:+.0%} · 최대 낙폭 {e_['max_dd']:.0%} · 샤프 {e_['sharpe']:.2f}")
+                        + (f"- 관문 없던 방식(v27): 연 {o_['cagr']:+.0%} · 최대 낙폭 {o_['max_dd']:.0%} · 샤프 {o_['sharpe']:.2f}\n"
+                           if o_.get("cagr") is not None else "")
+                        + f"- 단순 보유: 연 {e_['cagr']:+.0%} · 최대 낙폭 {e_['max_dd']:.0%} · 샤프 {e_['sharpe']:.2f}")
         else:
             st.write("추세 포트폴리오는 4시간봉 모드에서 일봉 데이터로 검증해요.")
     base_tr = lab["trades"]["base"]
@@ -363,13 +386,31 @@ def render_export() -> None:
     st.markdown("#### 📦 연구용 데이터 내보내기")
     st.caption("거래소 API로 과거 데이터를 받아 파일 하나(zip)로 저장해요. 이 파일을 Claude와의 대화에 올리면 "
                "Claude가 직접 수십 가지 변형을 돌려 정밀 검증할 수 있어요.")
+    ex_mode = st.radio("내보낼 데이터", ["4시간봉·일봉 (기본, 최대 5년)", "1시간봉 전용 (최대 2년)"], horizontal=True, key="ex_mode",
+                       help="1시간봉 전용: 1시간봉 매매법을 찾는 연구용. 1시간봉과 일봉(거시 흐름 계산용)만 담아요")
+    only_1h = ex_mode.startswith("1시간봉")
     x1, x2 = st.columns(2)
-    ex_n = x1.slider("코인 수 (거래량 순위)", 30, 100, 100, step=10, key="ex_n", help="61~100위까지 넣어야 스캔 범위 판단이 가능해요")
-    ex_days = x2.selectbox("기간", [365, 730], index=1, key="ex_days", format_func=lambda d: f"{d // 365}년")
-    ex_1h = st.checkbox("1시간봉 포함 (상위 30개·1년, 파일이 커지고 시간이 더 걸려요)", value=False, key="ex_1h")
-    st.caption("함께 담기는 것: 경제 일정, 상위 30개 코인의 펀딩비·미결제약정 기록, 코인베이스 프리미엄 계산용 BTC·ETH 1시간봉")
-    st.caption(f"예상 소요 {max(5, round(ex_n * 0.12 * ex_days / 730 + 5 + (6 if ex_1h else 0)))}분 이상 · "
-               f"예상 크기 약 {max(2, round(ex_n * 0.18 * ex_days / 730 + (8 if ex_1h else 0)))}MB")
+    ex_n = x1.slider("코인 수 (거래량 순위)", 30, 100, 60 if only_1h else 100, step=10, key="ex_n1" if only_1h else "ex_n",
+                     help="61~100위까지 넣어야 스캔 범위 판단이 가능해요")
+    if only_1h:
+        ex_days = x2.selectbox("기간", [365, 730], index=1, key="ex_days1", format_func=lambda d: f"{d // 365}년")
+        ex_1h = False
+    else:
+        ex_days = x2.selectbox("기간", [365, 730, 1095, 1825], index=1, key="ex_days",
+                               format_func=lambda d: f"{d // 365}년" + (" (2022 하락장 포함)" if d >= 1825 else ""))
+        ex_1h = st.checkbox("1시간봉 포함 (상위 30개·1년, 파일이 커지고 시간이 더 걸려요)", value=False, key="ex_1h")
+    if only_1h:
+        st.caption(f"1시간봉 {ex_n}개 코인 · {ex_days // 365}년 + 일봉 · 예상 소요 {max(5, round(ex_n * 0.35 * ex_days / 365))}분 이상 · "
+                   f"예상 크기 약 {max(2, round(ex_n * 0.17 * ex_days / 365 + 1))}MB (30MB가 넘으면 코인 수를 줄여 주세요)")
+    else:
+        st.caption("함께 담기는 것: 경제 일정, 상위 30개 코인의 펀딩비·미결제약정 기록, 코인베이스 프리미엄 계산용 BTC·ETH 1시간봉(최대 2년)")
+        _yrs_full, _yrs_more = min(ex_days, 730) / 730, max(0, ex_days - 730) / 730
+        st.caption(f"예상 소요 {max(5, round(ex_n * (0.12 * _yrs_full + 0.08 * _yrs_more) + 5 + (6 if ex_1h else 0)))}분 이상 · "
+                   f"예상 크기 약 {max(2, round(ex_n * (0.11 * _yrs_full + 0.06 * _yrs_more) + 2 + (5 if ex_1h else 0)))}MB")
+    if ex_days > 730:
+        st.caption("⏳ 3·5년은 오래 걸려요. 도중에 화면이 꺼져 끊겨도 같은 설정으로 다시 누르면, 12시간 안에 받아 둔 코인은 "
+                   "건너뛰고 이어서 받아요. 오래된 코인만 5년치가 있고, 최근 상장 코인은 상장일부터 들어가요. "
+                   "1시간봉은 이미 받은 2년 파일에 있으니 빼는 게 좋아요(업로드 크기).")
     if st.button("▶ 데이터 만들기", use_container_width=True):
         prog = st.progress(0.0, text="데이터 받는 중...")
 
@@ -381,9 +422,9 @@ def render_export() -> None:
             buf = io.StringIO()
             try:
                 with contextlib.redirect_stdout(buf):
-                    store["export"] = cmr.export_research_data(ex_n, ex_days, ex_1h, cb)
+                    store["export"] = cmr.export_research_data(ex_n, ex_days, ex_1h, cb, only_1h=only_1h)
                 now_ = pd.Timestamp.now(tz="UTC").tz_localize(None) + pd.Timedelta(hours=9)
-                store["export_name"] = f"research_data_{ex_n}coins_{ex_days}d_{now_:%Y%m%d_%H%M}.zip"
+                store["export_name"] = (f"research_data_{'1h_' if only_1h else ''}{ex_n}coins_{ex_days}d_{now_:%Y%m%d_%H%M}.zip")
                 store["export_error"] = None
             except Exception:
                 store["export_error"] = traceback.format_exc() + "\n" + buf.getvalue()
@@ -629,14 +670,16 @@ def get_portfolio():
     """오늘의 추세 포트폴리오 (하루에 한 번 계산해서 저장). 꺼져 있으면 None."""
     if not tsm_on:
         return None
-    day_key = (str(cmr.current_candle_start("1d")), port_n, round(bal_port, 2), cmr.TSM_TRIAL)
+    day_key = (str(cmr.current_candle_start("1d")), port_n, round(bal_port, 2), cmr.TSM_TRIAL, port_gross)
     if store.get("port_key") != day_key:
         with st.spinner("일봉으로 포트폴리오 계산 중..."):
             buf = io.StringIO()
             try:
                 with contextlib.redirect_stdout(buf):
-                    store["port"] = cmr.build_daily_portfolio(port_n, bal_port)
+                    store["port"] = cmr.build_daily_portfolio(port_n, bal_port, port_gross)
                 store["port_key"], store["port_error"] = day_key, None
+                if cmr.record_portfolio(store["port"]):          # 날짜당 한 번: '앱 지시대로 했다면' 실전 추적용
+                    cmr.cloud_sync()                                # (1분 간격 제한 — 못 올리면 다음 화면 갱신 때 올림)
             except Exception:
                 store["port_error"] = traceback.format_exc() + "\n" + buf.getvalue()
     return None if store.get("port_error") else store.get("port")
@@ -657,23 +700,41 @@ def render_portfolio_section() -> None:
     pf = store.get("port")
     if not pf:
         return
+    st.markdown(L.portfolio_gate_html(pf, cmr.tsm_gate_text(pf["gate"])), unsafe_allow_html=True)
     act = [r for r in pf["rows"] if r["status"] != "유지"]
     keep = [r for r in pf["rows"] if r["status"] == "유지"]
-    st.caption(f"기준 일봉 {pd.Timestamp(pf['date']):%m-%d} · 메이저 {pf['coins']}개 중 보유 {pf['n_hold']}개 · "
-               f"비중 합계 {pf['gross']:.0%} (포트폴리오 배분 {port_alloc}% = {bal_port:,.0f} USDT 기준)")
+    dl = kst(pf["deadline"]) if pf.get("deadline") is not None else "21시"
+    st.caption(f"기준 일봉 {pd.Timestamp(pf['date']):%m-%d} · 대상 {pf['coins']}개 중 보유 {pf['n_hold']}개 · "
+               f"비중 합계 {pf['gross']:.0%} / 상한 {pf.get('gross_cap', 1.0):.0%} "
+               f"(포트폴리오 금액 = 계좌의 {port_alloc}% = {bal_port:,.0f} USDT 기준) · ⏰ 조정 마감 {dl}")
     if pf.get("trial"):
         st.caption("🧪 시험 운용 중이라 비중을 ¼로 계산했어요. 다음 연구실에서 통과하면 정상 비중으로 바뀌어요.")
     if act:
         for r in act:
             st.markdown(L.portfolio_line(r), unsafe_allow_html=True)
-    else:
+    elif pf["n_hold"]:
         st.write("오늘은 조정할 포지션이 없어요. 보유 중인 코인을 그대로 두세요.")
+    else:
+        st.write("보유할 코인이 없어요. 포트폴리오 배분은 현금(USDT)으로 두세요.")
     if keep:
         with st.expander(f"⚪ 그대로 유지 ({len(keep)})"):
             for r in keep:
                 st.markdown(L.portfolio_line(r), unsafe_allow_html=True)
-    st.caption("ⓘ 보유 조건은 두 가지예요: 종가가 50일선 위, 그리고 30일 수익률 플러스. 둘 중 하나라도 깨지면 다음 날 '정리'로 올라와요. "
-               "포트폴리오 비중은 박스 돌파 신호의 리스크 한도와 별개라, 둘을 합친 전체 포지션 규모를 함께 확인하세요.")
+    with st.expander("🧾 포트폴리오 주문 방법"):
+        st.markdown(L.portfolio_exec_rules(pf.get("gross_cap", 1.0), dl))
+    trk = cmr.portfolio_tracking()
+    with st.expander("📒 포트폴리오 실전 추적 (앱 지시대로 했다면)", expanded=False):
+        if not trk:
+            st.write("기록이 이틀 이상 쌓이면 '매일 앱 목록대로 조정했다면'의 성과가 여기 나와요. 앱을 하루 한 번(09시 이후) 열면 자동 기록돼요.")
+        else:
+            st.line_chart(trk["curve"].rename("앱대로 했다면(시작=1)"))
+            st.markdown(f"- {trk['start']} ~ {trk['end']} ({trk['days']}일, 기록 {trk['records']}일·빠진 날 {trk['missing']}일) · "
+                        f"누적 **{trk['total']:+.1%}** · 최대 낙폭 {trk['max_dd']:.1%} · 관문 켜진 날 {trk['gate_days']}일 · 조정 {trk['rebalances']}회\n"
+                        f"- 비교 기준(2.5년 검증): 보유한 날 약 31% · 플러스 달 29% · 쉬는 달 29% · 최악의 달 −8% — 수익이 몇 달에 몰려요")
+        st.caption("ⓘ 규칙은 실전 기록 90일(관문 켜진 날 30일 이상)이 쌓이기 전에는 바꾸지 마세요. 짧은 기간 성과로 규칙을 바꾸면 "
+                   "과거에만 맞는 규칙이 되기 쉬워요. 기록은 Gist에 함께 저장돼요.")
+    st.caption("ⓘ 보유 조건: 시장 관문 켜짐 + 코인 종가가 50일선 위 + 30일 수익률 플러스. 하나라도 깨지면 다음 날 09시에 '정리'로 올라와요. "
+               "포트폴리오 비중은 신호 매매의 리스크 한도와 별개라, 둘을 합친 전체 노출을 함께 확인하세요.")
 
 
 def render_simulator() -> None:
@@ -714,8 +775,9 @@ def render_simulator() -> None:
 def render_today() -> None:
     now_kst = pd.Timestamp.now(tz="UTC").tz_localize(None) + pd.Timedelta(hours=9)
     st.markdown(f"### 📅 {now_kst:%m월 %d일} 오늘의 투자")
-    st.caption(f"⏱ 신호는 봉 마감 직후(01·05·09·13·17·21시) 바로 시장가로 들어갈 때 가장 좋아요. "
-               f"2시간이 지나면 엣지가 줄고, 4시간이 넘은 신호는 건너뛰세요 · 다음 신호 갱신 {kst(cmr.next_candle_close(res_tf))}")
+    st.caption(f"⏱ 박스 돌파·돌파 후 되돌림은 봉 마감 직후(01·05·09·13·17·21시) 바로 시장가로 들어갈 때 가장 좋아요 — "
+               f"2시간이 지나면 엣지가 줄고, 4시간이 넘으면 건너뛰세요. 📐 위치 다이버전스는 8시간 안이면 늦게 들어가도 괜찮아요 · "
+               f"다음 신호 갱신 {kst(cmr.next_candle_close(res_tf))}")
     live_refresh_if_due()
     r = store["result"]
     active_all = [s for s in r["all_setups"] if getattr(s, "health", "") != "paused"]
@@ -737,8 +799,14 @@ def render_today() -> None:
         sig_risk += sz["risk_amount"]
     port_notional = (pf["gross"] * bal_port) if pf else 0.0
     n_adj = sum(1 for x in (pf or {}).get("rows", []) if x["status"] != "유지")
+    gate_txt = ""
+    if pf and (pf.get("gate") or {}).get("enabled"):
+        gate_txt = (" (🟢 관문 켜짐" if pf["gate"]["on"] else " (🔴 관문 꺼짐") + \
+                   (" · 오늘 바뀜)" if pf["gate"].get("changed") else ")")
     lev = (sig_notional + port_notional) / balance if balance else 0.0
-    alloc_txt = (f"신호 매매 {100 - port_alloc}% ({bal_sig:,.0f} USDT) · 추세 포트폴리오 {port_alloc}% ({bal_port:,.0f} USDT)"
+    alloc_txt = ((f"신호 매매 계좌 전체 ({bal_sig:,.0f} USDT) 기준 + 추세 포트폴리오 계좌의 {port_alloc}% ({bal_port:,.0f} USDT) 추가"
+                  if port_overlay else
+                  f"신호 매매 {100 - port_alloc}% ({bal_sig:,.0f} USDT) · 추세 포트폴리오 {port_alloc}% ({bal_port:,.0f} USDT)")
                  if tsm_on else f"신호 매매 100% ({balance:,.0f} USDT) · 추세 포트폴리오 꺼짐")
     mf_ = r.get("macro_filter") or {}
     if mf_.get("blocked_side"):
@@ -746,7 +814,7 @@ def render_today() -> None:
     n_maj = sum(1 for s in todo if getattr(s, "group", "") == "메이저")
     st.markdown(f'<div class="allot">📋 <b>오늘 할 일</b>: 신규 진입 {len(todo)}건(메이저 {n_maj} · 일반 알트 {len(todo) - n_maj}) · '
                 f'지정가 대기 {len(waiting)}건 · '
-                f'포트폴리오 조정 {n_adj}건 · 알림 {min(len(watch), 5)}건<br>'
+                f'포트폴리오 조정 {n_adj}건{gate_txt} · 알림 {min(len(watch), 5)}건<br>'
                 f'💼 <b>계좌 배분</b>: {alloc_txt}<br>'
                 f'📊 <b>전체 노출</b>: 신규 진입 ${sig_notional:,.0f} + 포트폴리오 보유 ${port_notional:,.0f} '
                 f'= 계좌의 <b>{lev:.1f}배</b> · 신규 진입이 모두 손절되면 −${sig_risk:,.0f} (계좌의 {sig_risk / balance * 100:.1f}%)'
@@ -820,8 +888,10 @@ with st.expander("📖 용어 / 사용법"):
     st.markdown(
         "- **진입(지정가)**: 이 가격에 지정가 주문을 걸어요. 시장가로 쫓아 들어가지 않는 게 핵심입니다.\n"
         "- **손절**: 이 가격에 닿으면 무조건 정리. 수량은 '손절 시 손실이 계좌의 리스크 %'가 되도록 계산돼 있어요.\n"
-        "- **청산 계획**: 목표1에서 절반 익절 → 남은 절반의 손절을 진입가로 올림 → 이후 최고가(롱)·최저가(숏)에서 "
-        "카드에 적힌 폭만큼 되돌리면 정리(추적 손절). 목표2는 참고선이에요.\n"
+        "- **청산 계획(v27)**: 목표1(추적 시작)에 닿아도 팔지 않고 손절을 진입가로 올림 → 이후 최고가(롱)·최저가(숏)에서 "
+        "카드에 적힌 폭(박스 돌파 1 ATR, 되돌림·다이버전스 0.75 ATR)만큼 되돌리면 전량 정리. 최대 보유 5일(다이버전스 10일). "
+        "진입 직후 손절 주문과 트레일링 주문(활성화 가격 = 목표1)을 함께 걸어두면 돼요.\n"
+        "- **🔁 돌파 후 되돌림 / 📐 위치 다이버전스**: v27에서 추가한 매매법. 실전 추적 30건 평균이 플러스가 될 때까지 위험 절반.\n"
         "- **손익비**: (목표1까지 거리) ÷ (손절까지 거리).\n"
         "- **상태**: ✅ 진입가 근처 / ⏳ 추격 구간(대기) / ❌ 무효(손절선을 먼저 넘음) / ⌛ 놓침(목표1에 먼저 닿음). "
         "가격만 자동 갱신하고, 신호 자체는 봉 마감 때만 새로 계산해요.\n"

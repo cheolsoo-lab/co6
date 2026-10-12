@@ -21,15 +21,20 @@ TF_LABEL = {"4h": "4시간봉", "1h": "1시간봉"}
 BIAS_INFO = {
     "long": ("long", "롱", "추세 눌림목 진입"),
     "short": ("short", "숏", "추세 반등 매도"),
-    "wait_breakout_long": ("long", "롱", "박스 상단 돌파 후 리테스트"),
-    "wait_breakout_short": ("short", "숏", "박스 하단 이탈 후 리테스트"),
+    "wait_breakout_long": ("long", "롱", "박스 상단 돌파 · 봉 마감 직후 시장가"),
+    "wait_breakout_short": ("short", "숏", "박스 하단 이탈 · 봉 마감 직후 시장가"),
     "range_fade_long": ("long", "롱", "박스 하단 반등(평균회귀)"),
     "range_fade_short": ("short", "숏", "박스 상단 저항(평균회귀)"),
     "donchian_long": ("long", "롱", "신고점 돌파(약 20일) · 시장가"),
     "donchian_short": ("short", "숏", "신저점 이탈(약 20일) · 시장가"),
     "st_long": ("long", "롱", "ATR 추적선 상승 전환 · 시장가"),
     "st_short": ("short", "숏", "ATR 추적선 하락 전환 · 시장가"),
+    "retest_long": ("long", "롱", "🔁 돌파 후 되돌림(경계 지지 확인) · 시장가"),
+    "retest_short": ("short", "숏", "🔁 이탈 후 되돌림(경계 저항 확인) · 시장가"),
+    "div_long": ("long", "롱", "📐 위치 다이버전스(상승 추세 속 저점) · 시장가"),
+    "div_short": ("short", "숏", "📐 위치 다이버전스(하락 추세 속 고점) · 시장가"),
 }
+FAMILY_TAG = {"돌파 후 되돌림": "🔁 돌파 후 되돌림", "위치 다이버전스": "📐 위치 다이버전스"}
 
 CSS = """
 .block-container{padding-top:1.1rem;padding-bottom:3rem;max-width:720px}
@@ -143,19 +148,28 @@ STATUS_INFO = {
 
 
 def exit_plan_text(setup, scale: float = 1.0) -> str:
-    """목표1 분할 익절 → 본전 손절 → 추적 손절 계획을 한 줄로."""
-    from crypto_market_regime import PARTIAL_TP_FRACTION, TRAIL_ATR  # 지연 임포트
+    """청산 계획 한 줄. v27 규칙(목표1에서 팔지 않고 추적 손절로 전환) 또는 예전 규칙(목표1 절반 익절)."""
+    from crypto_market_regime import exit_of  # 지연 임포트
+    frac, trail_k, _ = exit_of(setup)
     side = side_info(setup.bias)[0]
-    pct = int(round(PARTIAL_TP_FRACTION * 100))
     anchor = "최고가" if side == "long" else "최저가"
-    trail = (f"{TRAIL_ATR:g} ATR(≈{fmt_price(TRAIL_ATR * setup.atr * scale)})"
-             if getattr(setup, "atr", 0) else f"{TRAIL_ATR:g} ATR")
-    return f"목표1에서 {pct}% 익절 → 남은 물량 손절을 진입가로 → 이후 {anchor}에서 {trail} 되돌리면 정리"
+    trail = (f"{trail_k:g} ATR(≈{fmt_price(trail_k * setup.atr * scale)})"
+             if getattr(setup, "atr", 0) else f"{trail_k:g} ATR")
+    if frac >= 1:
+        return "목표1에서 전량 익절"
+    if frac <= 0:
+        return f"목표1(추적 시작)에 닿아도 팔지 않음 → 손절을 진입가로 올림 → 이후 {anchor}에서 {trail} 되돌리면 전량 정리"
+    return f"목표1에서 {int(round(frac * 100))}% 익절 → 남은 물량 손절을 진입가로 → 이후 {anchor}에서 {trail} 되돌리면 정리"
+
+
+def tp1_label(setup) -> str:
+    from crypto_market_regime import exit_of  # 지연 임포트
+    return "목표1(추적 시작)" if exit_of(setup)[0] <= 0 else "목표1"
 
 
 def entry_label(setup) -> str:
     """신고점 돌파·즉시 진입은 시장가, 나머지는 지정가."""
-    market = setup.bias.startswith(("donchian", "st_")) or "즉시 진입" in (setup.entry_note or "")
+    market = setup.bias.startswith(("donchian", "st_", "retest_", "div_")) or "즉시 진입" in (setup.entry_note or "")
     return "진입(시장가)" if market else "진입(지정가)"
 
 
@@ -167,10 +181,11 @@ def perp_name(setup) -> str:
 def exec_rules(setup) -> list:
     """과거 검증과 똑같이 운용하기 위한 실행 규칙: 지정가 유효기간, 최대 보유 기한, 목표1 이후 트레일링 설정값."""
     import pandas as pd  # 지연 임포트
-    from crypto_market_regime import TIMEFRAME, TRAIL_ATR, PARTIAL_TP_FRACTION
+    from crypto_market_regime import TIMEFRAME, exit_of
+    frac, trail_k, hold_bars = exit_of(setup)
     bar = pd.Timedelta(TIMEFRAME)
     now_kst = pd.Timestamp.now(tz="UTC").tz_localize(None) + pd.Timedelta(hours=9)
-    hold_days = int(round(60 * bar / pd.Timedelta("1D")))
+    hold_days = int(round(hold_bars * bar / pd.Timedelta("1D")))
     out = []
     sig = getattr(setup, "signal_ts", "") or ""
     if getattr(setup, "live_status", "") == "chase" and sig:
@@ -181,9 +196,13 @@ def exec_rules(setup) -> list:
         out.append(f"보유 기한: 지금 진입하면 {now_kst + pd.Timedelta(days=hold_days):%m-%d}까지 — "
                    f"목표1·손절 모두 안 닿으면 그날 정리")
     if getattr(setup, "atr", 0) and setup.tp1:
-        cb = TRAIL_ATR * setup.atr / setup.tp1 * 100
-        out.append(f"목표1 도달 시: {int(PARTIAL_TP_FRACTION * 100)}% 익절 → 남은 물량 손절을 진입가로 → "
-                   f"거래소 트레일링 주문(활성화 가격 = 목표1, 되돌림 {cb:.1f}%)")
+        cb = trail_k * setup.atr / setup.tp1 * 100
+        if frac <= 0:
+            out.append(f"진입 직후: 손절 주문 + 거래소 트레일링 주문(전량, 활성화 가격 = 목표1, 되돌림 {cb:.1f}%)을 미리 걸어두기")
+            out.append("목표1 도달 시: 익절하지 말고 손절 주문만 진입가로 옮기기(본전) — 이후는 트레일링 주문이 정리")
+        else:
+            out.append(f"목표1 도달 시: {int(frac * 100)}% 익절 → 남은 물량 손절을 진입가로 → "
+                       f"거래소 트레일링 주문(활성화 가격 = 목표1, 되돌림 {cb:.1f}%)")
     return out
 
 
@@ -200,16 +219,29 @@ def elapsed_note(setup):
     if h < 0:
         return None
     t = f"{int(h * 60)}분" if h < 1 else f"{h:.1f}시간"
+    if setup.bias.startswith("div_"):   # 늦은 진입에 강함 (24개월 검증)
+        if h >= 12:
+            return (f"⛔ 신호 후 {t} — 12시간이 넘었어요. 검증해 본 범위(8시간) 밖이라 건너뛰세요", "stop")
+        if h >= 8:
+            return (f"⚠️ 신호 후 {t} — 8시간 넘게 늦으면 엣지가 줄어요(검증: 8시간 늦게 +0.70R). 리스크를 줄이거나 건너뛰세요", "warn")
+        return (f"⏱ 신호 후 {t} — 위치 다이버전스는 늦어도 괜찮아요(검증: 바로 +0.96R · 4시간 늦게 +0.87R · 8시간 늦게 +0.70R). "
+                f"새벽 신호는 아침에 들어가도 돼요", "ok")
+    if setup.bias.startswith("retest_"):
+        if h >= ELAPSED_STOP_H:
+            return (f"⛔ 신호 후 {t} — 진입 비권장. 되돌림 확인 뒤 늦게 들어가면 엣지가 반으로 줄어요(검증: 바로 +1.24R → 4시간 늦게 +0.63R)", "stop")
+        if h >= ELAPSED_WARN_H:
+            return (f"⚠️ 신호 후 {t} — 엣지가 줄고 있어요(검증: 바로 +1.24R → 4시간 늦게 +0.63R). 리스크를 줄이거나 건너뛰세요", "warn")
+        return (f"⏱ 신호 후 {t} — 지금 진입이 가장 좋아요(검증: 봉 마감 직후 +1.24R)", "ok")
     don = setup.bias.startswith("donchian")
     if don and h >= 1:
         return (f"⛔ 신호 후 {t} — 신고점 돌파는 1시간 안에 들어가야 해요(2시간 넘으면 검증 결과 마이너스). 건너뛰세요", "stop")
     if h >= ELAPSED_STOP_H:
-        return (f"⛔ 신호 후 {t} — 진입 비권장. 늦게 따라 들어간 돌파는 검증에서 평균 +0.1R 수준으로 엣지가 거의 사라져요", "stop")
+        return (f"⛔ 신호 후 {t} — 진입 비권장. 늦게 따라 들어간 돌파는 엣지가 크게 줄어요(검증: 바로 +0.83R → 4시간 늦게 +0.46R)", "stop")
     if h >= ELAPSED_WARN_H:
-        return (f"⚠️ 신호 후 {t} — 엣지가 줄었어요(검증: 바로 +0.49R → 2시간 뒤 +0.22R). 리스크를 줄이거나 건너뛰세요", "warn")
+        return (f"⚠️ 신호 후 {t} — 엣지가 줄었어요. 리스크를 줄이거나 건너뛰세요(검증: 바로 +0.83R → 4시간 늦게 +0.46R)", "warn")
     if h >= 1:
-        return (f"⏱ 신호 후 {t} — 아직 괜찮지만 엣지가 줄기 시작했어요(검증: 1시간 뒤 +0.31R, 2시간 뒤 +0.22R)", "ok")
-    return (f"⏱ 신호 후 {t} — 지금 진입이 가장 좋아요(검증: 봉 마감 직후 +0.49R)", "ok")
+        return (f"⏱ 신호 후 {t} — 아직 괜찮지만 엣지가 줄기 시작했어요(검증: 늦을수록 줄어 4시간 늦으면 +0.46R)", "ok")
+    return (f"⏱ 신호 후 {t} — 지금 진입이 가장 좋아요(검증: 봉 마감 직후 +0.83R)", "ok")
 
 
 def flow_summary_html(regime) -> str:
@@ -244,7 +276,8 @@ def order_memo(setup, sizing: Dict, lev: int) -> str:
         f"{perp_name(setup)}  {side_kr} ({sub})",
         f"{entry_label(setup)}: {fmt_price(setup.entry_price * m)}",
         f"손절: {fmt_price(setup.sl * m)}",
-        f"목표1: {fmt_price(setup.tp1 * m)}  /  목표2(참고): {fmt_price(setup.tp2 * m)}",
+        (f"{tp1_label(setup)}: {fmt_price(setup.tp1 * m)}" if tp1_label(setup) != "목표1"
+         else f"목표1: {fmt_price(setup.tp1 * m)}  /  목표2(참고): {fmt_price(setup.tp2 * m)}"),
         f"청산: {exit_plan_text(setup, m)}",
         f"수량: {sizing['size'] / m:.4f}  (명목 ${fmt_money(sizing['notional'])})",
         f"레버리지 상한 가이드: {lev}배 이하 (격리)",
@@ -281,20 +314,67 @@ PORT_ICON = {"신규 진입": "🟢", "비중 조정": "🔄", "정리": "🔴",
 
 
 def portfolio_line(r: Dict) -> str:
-    """추세 포트폴리오 한 줄. 선물이 1000배 표기면 가격을 선물 기준으로 환산."""
+    """추세 포트폴리오 한 줄. 선물이 1000배 표기면 가격·수량을 선물 기준으로 환산."""
     m = int(r.get("perp_mult", 1) or 1)
     name = (r.get("perp_symbol") or r["symbol"]).split(":")[0].replace("/", "")
+    qty = (r.get("qty") or 0.0) / m
+    dq = (r.get("delta_qty") or 0.0) / m
     if r["status"] == "정리":
         why = f" — {html.escape(r['reason'])}" if r.get("reason") else ""
-        body = f"전량 정리 (어제 비중 {r['prev_weight']:.0%}){why}"
+        body = f"<b>전량 정리</b> (어제 목표 {r['prev_weight']:.0%} · ${fmt_money(r.get('prev_notional', 0.0))}){why}"
     elif r["status"] == "비중 조정":
-        body = f"비중 {r['prev_weight']:.0%} → <b>{r['weight']:.0%}</b> (명목 ${fmt_money(r['notional'])})"
+        verb = "늘리기" if dq > 0 else "줄이기"
+        body = (f"비중 {r['prev_weight']:.0%} → <b>{r['weight']:.0%}</b> · 목표 ${fmt_money(r['notional'])} "
+                f"(수량 약 {qty:,.4g}개 · {abs(dq):,.4g}개 {verb})")
+    elif r["status"] == "신규 진입":
+        body = f"목표 비중 <b>{r['weight']:.0%}</b> · ${fmt_money(r['notional'])} (롱 수량 약 {qty:,.4g}개)"
     else:
-        body = f"목표 비중 <b>{r['weight']:.0%}</b> (명목 ${fmt_money(r['notional'])})"
+        body = f"목표 비중 <b>{r['weight']:.0%}</b> · ${fmt_money(r['notional'])} (수량 약 {qty:,.4g}개)"
+    mn = r.get("min_notional") or 5.0                     # 모르면 Bitget 최소 주문 금액 5 USDT로 가정
+    small = r["status"] != "정리" and 0 < r.get("notional", 0.0) < mn
+    if small:
+        body += f'<br>⚠️ 목표 금액이 최소 주문(약 ${fmt_money(mn)})보다 작아요 — 이 코인은 건너뛰세요(배분을 늘리면 해결)'
     return (f'<div class="watch">{PORT_ICON.get(r["status"], "")} <b>{html.escape(name)}</b> {r["status"]} · {body}<br>'
             f'<span class="k">종가 {fmt_price(r["close"] * m)} · 50일선 {fmt_price(r["exit_line"] * m)}'
             f'{" · 30일 수익률 " + format(r["ret30"], "+.1%") if r.get("ret30") is not None else ""}'
             f'{" · 선물 ×" + format(m, ",") + " 표기" if m > 1 else ""}</span></div>')
+
+
+def portfolio_gate_html(pf: Dict, gate_text: str) -> str:
+    """시장 관문 상태 상자"""
+    g = pf.get("gate") or {}
+    if not g.get("enabled", True):
+        return ""
+    on = g.get("on")
+    head = ("🟢 <b>시장 관문 켜짐</b> — 추세 코인을 보유하는 구간" if on
+            else "🔴 <b>시장 관문 꺼짐</b> — 포트폴리오 전부 현금(정리) 구간")
+    chg = " · <b>오늘 바뀜</b>" if g.get("changed") else f" · {g.get('days', 0)}일째"
+    tail = ""
+    if not on:
+        need = []
+        if not g.get("btc_ok") and g.get("btc_sma"):
+            need.append(f"BTC 종가가 100일선({fmt_price(g['btc_sma'])}) 위로 마감")
+        if not g.get("breadth_ok"):
+            need.append(f"20일선 위 코인 {g.get('need_up', 0)}개 이상(지금 {g.get('n_up', 0)}개)")
+        tail = "<br>켜지는 조건: " + " 그리고 ".join(need) + " — 둘 다 맞는 날 09시에 진입 목록이 떠요"
+        if pf.get("waiting"):
+            tail += "<br>켜지면 들어갈 코인(개별 추세 충족): " + ", ".join(
+                html.escape(s.split("/")[0]) for s in pf["waiting"])
+    return (f'<div class="allot">{head}{chg}<br><span class="k">{html.escape(gate_text)} · '
+            f'최근 90일 중 켜진 날 {g.get("on_ratio_90d", 0):.0%}</span>{tail}</div>')
+
+
+def portfolio_exec_rules(gross_cap: float, deadline_kst: str) -> str:
+    """포트폴리오 주문 방법(마크다운)"""
+    margin = gross_cap / 2
+    return (f"- ⏰ **언제**: 매일 09시 일봉 마감 뒤 목록이 바뀌어요. **오늘 {deadline_kst}까지** 조정하세요. "
+            "검증에서 12시간 안에 하면 효과가 유지됐고, 하루 늦게 하면 대부분 사라졌어요. 놓친 날은 넘기고 다음 날 목록을 따르세요.\n"
+            "- 🎯 **얼마나**: 목록의 **목표 금액(명목)** 에 맞추세요. 실제 보유가 앱의 어제 목표와 달라도 목표 금액 기준으로 맞추면 돼요.\n"
+            "- 🧾 **주문**: 지정가(Post-only)로 매수 1호가/매도 1호가에 걸고, 30~60분 안에 안 채워지면 시장가로 바꾸세요 "
+            "(전부 지정가로 채워지면 비용이 연 3%p 정도 줄어요). 관문이 꺼진 날·정리는 그날 안에 전부 정리.\n"
+            f"- 🛡 **증거금**: 격리 마진·**레버리지 2배 고정**. 청산가가 진입가에서 약 −50% 떨어져 있어 급락 꼬리에도 안전해요. "
+            f"비중 합계 {gross_cap:.0%}면 증거금은 포트폴리오 배분의 최대 {margin:.0%}가 필요해요. 3배 이상은 급락 때 청산 위험.\n"
+            "- 🚫 **손절 주문 없음**: 일봉 종가로만 판단해요(장중 손절은 검증에서 오히려 나빴어요). 대신 관문·50일선이 정리 신호예요.")
 
 
 def dead_line(setup) -> str:
@@ -303,6 +383,13 @@ def dead_line(setup) -> str:
     icon, label = STATUS_INFO.get(setup.live_status, ("", setup.live_status))
     return (f'<div class="dead"><b>{html.escape(setup.symbol)}</b> {side_kr} · {icon} {html.escape(label)} '
             f'<span class="k">(현재가 {fmt_price(setup.current_price)})</span></div>')
+
+
+def _hold_text(bars: int) -> str:
+    import pandas as pd  # 지연 임포트
+    from crypto_market_regime import TIMEFRAME
+    d = bars * pd.Timedelta(TIMEFRAME) / pd.Timedelta("1D")
+    return f"{d:g}일" if d >= 1 else f"{bars}봉"
 
 
 def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) -> str:
@@ -322,6 +409,10 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
         tags += f'<span class="tag">{e(vt.replace("거래량 ", ""))}</span>'
     if getattr(setup, "counter_trend", False):
         tags += '<span class="tag ct">↔ 시장 역행</span>'
+    from crypto_market_regime import SETUP_FAMILY, exit_of  # 지연 임포트
+    fam_ = SETUP_FAMILY.get(setup.bias, "")
+    if fam_ in FAMILY_TAG:
+        tags += f'<span class="tag lab">{e(FAMILY_TAG[fam_])}</span>'
     status = getattr(setup, "live_status", "") or ("chase" if setup.is_chase else "ready")
     s_icon, s_label = STATUS_INFO.get(status, ("", ""))
     from crypto_market_regime import TAG_LABELS, PRIORITY_TAGS, LAB_TAGS  # 지연 임포트
@@ -344,8 +435,9 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
         cell("현재가", fmt_price(setup.current_price)),
         cell(entry_label(setup), fmt_price(setup.entry_price)),
         cell("손절", fmt_price(setup.sl), "sl"),
-        cell("목표1", fmt_price(setup.tp1), "tp"),
-        cell("목표2(참고)", fmt_price(setup.tp2), "tp"),
+        cell(tp1_label(setup), fmt_price(setup.tp1), "tp"),
+        (cell("최대 보유", _hold_text(exit_of(setup)[2])) if exit_of(setup)[0] <= 0
+         else cell("목표2(참고)", fmt_price(setup.tp2), "tp")),
         cell("손익비", f"{setup.rr_ratio:.2f}"),
     ])
     foot = (f"수량 <b>{sizing['size']:.4f}</b> · 명목 ${fmt_money(sizing['notional'])} · "
@@ -368,6 +460,9 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
     if getattr(setup, "event_note", ""):
         warn += (f'<div class="over">📅 {e(setup.event_note)} — 크게 흔들리는 시간대라 권장 리스크를 절반으로 계산했어요. '
                  f'검증에서 이 시간대 진입은 평균 −0.25R이었으니 가능하면 건너뛰세요</div>')
+    if getattr(setup, "half_start", False):
+        warn += ('<div class="over">🌱 새 매매법(v27) — 실전 기록이 쌓이기 전이라 리스크를 절반으로 낮춰 수량을 계산했어요 '
+                 '(실전 추적 30건 평균이 플러스면 자동으로 정상 리스크)</div>')
     if getattr(setup, "trial", False):
         warn += ('<div class="over">🧪 시험 운용 신호 — 리스크를 ¼로 낮춰 수량을 계산했어요 '
                  '(실전 30건이 과거 기준선 안에 들면 자동으로 정상 리스크로 승격)</div>')
