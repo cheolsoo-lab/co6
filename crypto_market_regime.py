@@ -41,7 +41,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-12 v29"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-12 v29.1"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -2358,11 +2358,17 @@ def build_universe(top_n: Optional[int] = None, perps: Optional[set] = None) -> 
     - perps를 주면 Bitget 선물로 거래 가능한 코인만 남긴 뒤 순위를 자름 → N은 '실제 거래 가능한 N개'"""
     top_n = top_n or TOP_N_BY_VOLUME
     merged: Dict[str, Dict] = {}
+    # v29.1: 선물 목록이 있으면 거래대금 목록을 자르지 않고 받음. 거래소 현물 상위권에 선물 없는 종목(토큰화 주식 등)이
+    # 많아서, 2배만 받으면 다른 거래소 목록을 못 받는 환경(예: 해외 서버의 Streamlit Cloud)에서 N개보다 적게 남았음
+    want = 100_000 if perps else max(top_n, 30) * 2
+    src_status: Dict[str, str] = {}
     for exchange_id in EXCHANGES:
         try:
-            lst = _volume_list(exchange_id, max(top_n, 30) * 2)
+            lst = _volume_list(exchange_id, want)
+            src_status[exchange_id] = f"{len(lst)}개"
         except Exception as e:
             print(f"[warn] {exchange_id} 거래량 목록 조회 실패: {e}")
+            src_status[exchange_id] = "실패(" + (re.search(r"\b(4\d\d|5\d\d)\b", str(e)) or [str(e)[:30]])[0] + ")"
             continue
         for sym, vol in lst:
             if _is_excluded_symbol(sym):
@@ -2373,6 +2379,7 @@ def build_universe(top_n: Optional[int] = None, perps: Optional[set] = None) -> 
                 merged[sym]["vol"] = max(merged[sym]["vol"], vol)
     ranked = sorted(merged.items(), key=lambda kv: -kv[1]["vol"])
     UNIVERSE_DIAG.clear()
+    UNIVERSE_DIAG["거래량 목록"] = " · ".join(f"{k} {v}" for k, v in src_status.items())
     UNIVERSE_DIAG["합산 후보"] = len(ranked)
     if perps:
         kept, dropped, mult_n, miss = [], 0, 0, []
