@@ -61,7 +61,7 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-12 v29.1"
+APP_VERSION = "2026-10-12 v29.2"
 st.title("▲△▲ ▲△▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
@@ -601,6 +601,9 @@ def recommendations() -> None:
     if fs_.get("universe") and fs_["universe"] < 0.8 * top_n:
         st.warning(f"⚠️ 스캔한 코인이 설정({top_n}개)보다 적은 {fs_['universe']}개예요. 거래소 응답: {_ud.get('거래량 목록', '확인 불가')}. "
                    "실패한 거래소가 있으면 서버 위치 때문에 막힌 거예요(Streamlit Cloud는 해외 서버). 추천이 PC와 다를 수 있어요.")
+    elif str(_ud.get("순위 기준", "")).startswith("Bitget 선물"):
+        st.caption(f"ⓘ 이 서버에선 거래소 현물 목록이 지역 제한으로 비어 있어서 Bitget 선물 거래대금 순위로 코인을 골랐어요"
+                   f"(선물 시세로 분석 {_ud.get('선물 캔들로 분석', 0)}개). 매매법·설정은 같고, PC와 코인 순위가 조금 다를 수 있어요.")
     mf_ = r.get("macro_filter") or {}
     if mf_.get("blocked_side"):
         st.info(f"🧭 거시 필터: 일봉 흐름 점수 {mf_['score']:+.2f} → {mf_['blocked_side']} 신호 제외 중"

@@ -41,7 +41,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-12 v29.1"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-12 v29.2"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -382,6 +382,45 @@ def _get_ex(exchange_id: str):
     return _EX_CACHE[exchange_id]
 
 
+def _mkt_symbol(ex, symbol: str) -> str:
+    """조회에 쓸 실제 심볼. v29.2: 이 거래소에 그 현물이 없거나 거래 중지인데 같은 이름의 USDT 무기한 선물이 있으면 선물 심볼.
+    (해외 서버에선 Bitget 현물 목록이 지역 제한으로 비어 있어서, 선물 시세로 분석하도록 보완. 현물이 정상이면 그대로 현물)"""
+    if ":" in symbol:
+        return symbol
+    try:
+        mk = ex.markets or ex.load_markets() or {}
+    except Exception:
+        return symbol
+    m = mk.get(symbol)
+    if m and m.get("active") is not False:
+        return symbol
+    sw = f"{symbol}:{QUOTE}"
+    return sw if sw in mk else symbol
+
+
+def _last_prices(ex_id: str, syms: List[str]) -> Dict[str, float]:
+    """한 거래소의 여러 심볼 현재가 {심볼: 가격}. 현물·선물(위 _mkt_symbol로 바뀐 것)을 나눠 한 번씩 조회."""
+    ex = _get_ex(ex_id)
+    real = {s: _mkt_symbol(ex, s) for s in syms}
+    groups: Dict[bool, List[str]] = {}
+    for r in real.values():
+        groups.setdefault(":" in r, []).append(r)
+    tickers: Dict = {}
+    for is_swap, g in groups.items():
+        try:
+            tickers.update(ex.fetch_tickers(g) or {})
+        except Exception:
+            params = ({"type": "swap", "productType": "USDT-FUTURES"} if ex_id == "bitget" else {"type": "swap"}) if is_swap else {}
+            tickers.update(ex.fetch_tickers(None, params) or {})
+    out: Dict[str, float] = {}
+    for s, r in real.items():
+        t = tickers.get(r) or {}
+        last = t.get("last") or t.get("close")
+        if last:
+            out[s] = float(last)
+    return out
+
+
 def fetch_btc_df() -> pd.DataFrame:
     """BTC 4h 캔들. 한 거래소가 지역 차단/장애여도 다음 거래소로 넘어가도록 순차 시도."""
     for ex_id in EXCHANGES:
@@ -456,12 +495,13 @@ def fetch_ohlcv(exchange_id: str, symbol: str, timeframe: Optional[str] = None,
         raise RuntimeError("ccxt가 설치되어 있지 않습니다. `pip install ccxt` 실행 후 재시도하세요.")
     try:
         ex = _get_ex(exchange_id)
+        msym = _mkt_symbol(ex, symbol)
         try:
-            raw = _fetch_ohlcv_paged(ex, symbol, timeframe, limit)
+            raw = _fetch_ohlcv_paged(ex, msym, timeframe, limit)
         except Exception:
             raw = []
         if len(raw) < 60:  # 나눠 받기가 안 되는 거래소면 한 번에 받을 수 있는 만큼이라도
-            raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=min(limit, 1000))
+            raw = ex.fetch_ohlcv(msym, timeframe=timeframe, limit=min(limit, 1000))
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
         df = df.drop_duplicates(subset="ts").sort_values("ts").tail(limit).reset_index(drop=True)
         df["ts"] = pd.to_datetime(df["ts"], unit="ms")
@@ -1169,21 +1209,50 @@ class CoinSetup:
     half_start: bool = False            # v27: 새 매매법 — 위험 절반으로 시작
 
 
+_VOL_DIAG: Dict[str, Dict] = {}   # v29.2: 거래소별 현물 목록 상태(진단 표시용)
+
+
+def _ticker_qv(t: Optional[Dict]) -> float:
+    """24h 거래대금(USDT). v29.2: quoteVolume이 비어 있으면 거래량×가격, 그것도 없으면 거래소 원본 필드로.
+    (ccxt 버전·서버 지역에 따라 quoteVolume이 빠져 모든 코인이 0으로 보이던 문제 대비)"""
+    if not t:
+        return 0.0
+    try:
+        v = t.get("quoteVolume")
+        if v:
+            return float(v)
+        bv, px = t.get("baseVolume"), t.get("last") or t.get("close")
+        if bv and px:
+            return float(bv) * float(px)
+        info = t.get("info") or {}
+        if isinstance(info, dict):
+            for k in ("usdtVolume", "quoteVolume", "turnover24h", "volCcy24h", "quoteVol"):
+                v = info.get(k)
+                if v not in (None, "", "0"):
+                    return float(v)
+    except Exception:
+        pass
+    return 0.0
+
+
 def _volume_list(exchange_id: str, top_n: int) -> List[tuple]:
     """(심볼, 24h 거래대금) 목록, 거래대금 순. 거래 가능 여부가 비어 있으면(None) 가능으로 처리."""
     ex = _get_ex(exchange_id)
     markets = ex.load_markets()
-    tickers = ex.fetch_tickers()
-    usdt_pairs = [s_ for s_ in markets
-                  if s_.endswith(f"/{QUOTE}") and markets[s_].get("active") is not False
-                  and markets[s_].get("spot") is not False]
+    tickers = ex.fetch_tickers() or {}
+    usdt_all = [s_ for s_ in markets if s_.endswith(f"/{QUOTE}") and markets[s_].get("spot") is not False]
+    usdt_pairs = [s_ for s_ in usdt_all if markets[s_].get("active") is not False]
+    vols = {s_: _ticker_qv(tickers.get(s_)) for s_ in usdt_pairs}
 
     def qv(sym: str) -> float:
-        return tickers.get(sym, {}).get("quoteVolume") or 0
+        return vols.get(sym, 0.0)
 
     ranked = sorted(usdt_pairs, key=qv, reverse=True)
+    n_vol = sum(1 for sym in ranked if qv(sym) > 0)
+    _VOL_DIAG[exchange_id] = {"pairs": len(usdt_all), "active": len(usdt_pairs), "tickers": len(tickers),
+                              "with_vol": n_vol, "btc": f"BTC/{QUOTE}" in usdt_pairs}
     # 거래대금 정보를 주지 않는 거래소면 필터를 건너뜀 (전부 0으로 보여 통째로 빠지는 것 방지)
-    if sum(1 for sym in ranked if qv(sym) > 0) >= 10:
+    if n_vol >= 10:
         ranked = [sym for sym in ranked if qv(sym) >= MIN_QUOTE_VOLUME_USDT]
     return [(sym, float(qv(sym))) for sym in ranked[:top_n]]
 
@@ -1248,7 +1317,7 @@ def get_spread_pct(exchange_id: str, symbol: str) -> Optional[float]:
     슬리피지 리스크가 큰 종목을 걸러내는 데 사용."""
     try:
         ex = _get_ex(exchange_id)
-        ticker = ex.fetch_ticker(symbol)
+        ticker = ex.fetch_ticker(_mkt_symbol(ex, symbol))
         bid, ask = ticker.get("bid"), ticker.get("ask")
         if not bid or not ask:
             return None
@@ -2340,6 +2409,73 @@ _PERP_MULTS = (1, 1000, 10000, 1000000)
 UNIVERSE_DIAG: Dict = {}
 
 
+def bitget_perp_volumes() -> Dict[str, float]:
+    """v29.2: Bitget USDT-M 선물 24h 거래대금(USDT) {선물 심볼: 금액}. 실패하면 빈 dict.
+    현물 거래대금을 못 받는 환경(해외 서버 등)에서 순위를 매기는 데 씀 — 실제로 거래하는 상품의 거래대금이라 기준으로도 자연스러움."""
+    try:
+        ex = _get_ex("bitget")
+        ex.load_markets()
+    except Exception as e:
+        print(f"[warn] Bitget 시장 목록 조회 실패: {e}")
+        return {}
+    tk: Dict = {}
+    for params in ({"type": "swap", "productType": "USDT-FUTURES"}, {"productType": "USDT-FUTURES"}):
+        try:
+            tk = ex.fetch_tickers(None, params) or {}
+            if tk:
+                break
+        except Exception as e:
+            print(f"[warn] Bitget 선물 시세 조회 실패: {e}")
+    swap_keys = [s for s in tk if ":" in s]
+    out: Dict[str, float] = {}
+    for s in (swap_keys or list(tk)):
+        p = s if ":" in s else f"{s}:{QUOTE}"
+        if p.endswith(f"/{QUOTE}:{QUOTE}"):
+            out[p] = max(out.get(p, 0.0), _ticker_qv(tk[s]))
+    return out
+
+
+def _is_rwa_perp(perp: str) -> bool:
+    """주식·원자재 등 코인이 아닌 선물(거래소 정보에 RWA 표시가 있는 경우) — 코인으로 검증한 매매법이라 제외."""
+    try:
+        info = ((_get_ex("bitget").markets or {}).get(perp) or {}).get("info") or {}
+        return any(str(info.get(k, "")).strip().upper() in ("YES", "TRUE", "1") for k in ("isRwa", "isRWA", "rwa"))
+    except Exception:
+        return False
+
+
+def _perp_ranked_universe(perps: set, pvol: Dict[str, float]) -> List[tuple]:
+    """v29.2: Bitget 선물 거래대금 순위로 고른 후보 [(심볼, info)].
+    캔들: Bitget 현물이 정상이면 현물(PC와 같은 데이터), 없으면 그 선물 자체(_mkt_symbol이 자동으로 선물로 조회)."""
+    bg = _EX_CACHE.get("bitget")
+    mk = (bg.markets or {}) if bg is not None else {}
+
+    def spot_ok(s: str) -> bool:
+        m = mk.get(s)
+        return bool(m) and m.get("spot") is not False and m.get("active") is not False
+
+    out, seen = [], set()
+    for p, pv in sorted(pvol.items(), key=lambda kv: -kv[1]):
+        if p not in perps or pv < MIN_QUOTE_VOLUME_USDT or _is_rwa_perp(p):
+            continue
+        base_p = p.split("/")[0]
+        sym, m = f"{base_p}/{QUOTE}", 1               # 기본: 선물 이름 그대로(현물 없으면 선물 캔들)
+        if not spot_ok(sym):
+            for mm in sorted(_PERP_MULTS[1:], reverse=True):   # 1000PEPE → 현물 PEPE(가격 1000배 표기)가 있으면 그 현물로
+                pref = str(mm)
+                rest = base_p[len(pref):]
+                if base_p.startswith(pref) and rest and not rest[0].isdigit():
+                    if spot_ok(f"{rest}/{QUOTE}"):
+                        sym, m = f"{rest}/{QUOTE}", mm
+                    break
+        if _is_excluded_symbol(sym) or sym in seen:
+            continue
+        seen.add(sym)
+        out.append((sym, {"src": "bitget", "vol": float(pv), "perp": p, "mult": m,
+                          "candle": "현물" if spot_ok(sym) else "선물"}))
+    return out
+
+
 def perp_match(symbol: str, perps: set):
     """현물 심볼에 맞는 Bitget 선물 심볼과 가격 배수. 예) PEPE/USDT → 1000PEPE/USDT:USDT, 1000배.
     (선물은 가격이 너무 작은 코인을 1000배 단위로 표기해서, 그대로 찾으면 '선물 없음'으로 빠졌음)"""
@@ -2362,6 +2498,7 @@ def build_universe(top_n: Optional[int] = None, perps: Optional[set] = None) -> 
     # 많아서, 2배만 받으면 다른 거래소 목록을 못 받는 환경(예: 해외 서버의 Streamlit Cloud)에서 N개보다 적게 남았음
     want = 100_000 if perps else max(top_n, 30) * 2
     src_status: Dict[str, str] = {}
+    _VOL_DIAG.clear()
     for exchange_id in EXCHANGES:
         try:
             lst = _volume_list(exchange_id, want)
@@ -2381,25 +2518,60 @@ def build_universe(top_n: Optional[int] = None, perps: Optional[set] = None) -> 
     UNIVERSE_DIAG.clear()
     UNIVERSE_DIAG["거래량 목록"] = " · ".join(f"{k} {v}" for k, v in src_status.items())
     UNIVERSE_DIAG["합산 후보"] = len(ranked)
+    bd = _VOL_DIAG.get("bitget")
+    if bd:
+        UNIVERSE_DIAG["Bitget 현물"] = (f"목록 {bd['pairs']} · 거래 가능 {bd['active']} · 시세 {bd['tickers']} · "
+                                       f"거래대금 있음 {bd['with_vol']} · BTC {'있음' if bd['btc'] else '없음'}")
     if perps:
-        kept, dropped, mult_n, miss = [], 0, 0, []
-        for sym, info in ranked:
-            p, m = perp_match(sym, perps)
+        matched = [(sym, info, *perp_match(sym, perps)) for sym, info in ranked]
+        n_spot_ok = sum(1 for _, info, p, _ in matched if p is not None and info["vol"] > 0)
+        # 선물 거래대금은 필요할 때만 조회: 현물 거래대금이 비어 있는 코인이 있거나, 현물 기준으로 N개를 크게 못 채울 때
+        need_pvol = any(p is not None and info["vol"] <= 0 for _, info, p, _ in matched) or n_spot_ok < 0.8 * top_n
+        pvol = bitget_perp_volumes() if need_pvol else {}
+        kept, dropped, mult_n, miss, covered = [], 0, 0, [], set()
+        n_fill = n_thin = n_dup = 0
+        for sym, info, p, m in matched:
             if p is None:
                 dropped += 1
                 miss.append((sym, info["src"]))
                 continue
+            if p in covered:            # v29.2: 같은 선물에 현물 두 개(예: SATS·1000SATS)가 붙으면 거래대금 큰 쪽만 (같은 추천 두 번 방지)
+                n_dup += 1
+                continue
+            if info["vol"] <= 0 and pvol:   # 현물 거래대금을 안 준 거래소 → 선물 거래대금으로 대신, 기준 미달이면 제외
+                pv = pvol.get(p, 0.0)
+                if pv < MIN_QUOTE_VOLUME_USDT:
+                    n_thin += 1
+                    continue
+                info["vol"] = pv
+                n_fill += 1
             info.update(perp=p, mult=m)
+            covered.add(p)
             mult_n += m > 1
             kept.append((sym, info))
+        kept.sort(key=lambda kv: -kv[1]["vol"])
+        basis = "현물 거래대금"
+        if len(kept) < 0.8 * top_n and pvol:
+            # v29.2: 해외 서버(Streamlit Cloud 등)는 지역 제한으로 현물 목록이 비거나 코인이 빠져 있어서 N개보다 훨씬 적게 남았음
+            # → Bitget 선물 거래대금 순위로 바로 고름. PC처럼 현물 목록이 정상이면 이 경로를 타지 않음(결과 그대로)
+            alt = _perp_ranked_universe(perps, pvol)
+            if len(alt) > len(kept):
+                kept, basis = alt, "Bitget 선물 거래대금(현물 목록 부족 → 보완)"
+                UNIVERSE_DIAG["선물 캔들로 분석"] = sum(1 for _, i in kept[:top_n] if i.get("candle") == "선물")
         ranked = kept
         by_src: Dict[str, int] = {}
         for _, src in miss:
             by_src[src] = by_src.get(src, 0) + 1
-        UNIVERSE_DIAG.update({"Bitget 선물 없음": dropped, "배수 표기로 매칭(1000PEPE 등)": mult_n,
+        UNIVERSE_DIAG.update({"순위 기준": basis,
+                              "Bitget 선물": f"{len(perps)}개({PERPS_SOURCE})"
+                                             + (f" · 거래대금 300만$ 이상 {sum(1 for v in pvol.values() if v >= MIN_QUOTE_VOLUME_USDT)}"
+                                                if pvol else (" · 거래대금 조회 실패" if need_pvol else "")),
+                              "Bitget 선물 없음": dropped, "배수 표기로 매칭(1000PEPE 등)": mult_n,
                               "선물 없음 출처": "·".join(f"{k} {v}" for k, v in by_src.items()) or "-",
                               "선물 없음 예시(거래량 큰 순)": " ".join(x.split("/")[0] for x, _ in miss[:15]) or "-",
                               "선물 목록 예시": " ".join(sorted(x.split("/")[0] for x in perps)[:8])})
+        if n_fill or n_thin or n_dup:
+            UNIVERSE_DIAG["현물 거래대금 없음→선물 기준"] = f"{n_fill}개 사용 · 기준 미달 {n_thin}개 제외 · 중복 {n_dup}개 제외"
     else:
         for sym, info in ranked:
             info.update(perp=f"{sym}:{QUOTE}", mult=1)
@@ -2442,16 +2614,8 @@ def _fetch_last_prices(by_ex: Dict[str, List[str]]) -> Dict[tuple, float]:
     prices: Dict[tuple, float] = {}
     for ex_id, syms in by_ex.items():
         try:
-            ex = _get_ex(ex_id)
-            try:
-                tickers = ex.fetch_tickers(syms)
-            except Exception:
-                tickers = ex.fetch_tickers()
-            for sym in syms:
-                t = tickers.get(sym) or {}
-                last = t.get("last") or t.get("close")
-                if last:
-                    prices[(ex_id, sym)] = float(last)
+            for sym, p in _last_prices(ex_id, syms).items():
+                prices[(ex_id, sym)] = p
         except Exception as e:
             print(f"[warn] {ex_id} 현재가 조회 실패: {e}")
     return prices
@@ -2497,16 +2661,8 @@ def refresh_live_status(setups: List["CoinSetup"]) -> int:
     prices: Dict = {}
     for ex_id, syms in by_ex.items():
         try:
-            ex = _get_ex(ex_id)
-            try:
-                tickers = ex.fetch_tickers(syms)
-            except Exception:
-                tickers = ex.fetch_tickers()
-            for sym in syms:
-                t = tickers.get(sym) or {}
-                last = t.get("last") or t.get("close")
-                if last:
-                    prices[(ex_id, sym)] = float(last)
+            for sym, p in _last_prices(ex_id, syms).items():
+                prices[(ex_id, sym)] = p
         except Exception as e:
             print(f"[warn] {ex_id} 실시간 가격 조회 실패: {e}")
     updated = 0
@@ -3217,7 +3373,8 @@ def fetch_extended_ohlcv(exchange_id: str, symbol: str, timeframe: Optional[str]
     timeframe = timeframe or TIMEFRAME
     ex = _get_ex(exchange_id)
     # 거래소마다 한 번에 주는 개수가 100~1000개라, 가장 적게 주는 경우(100개)도 최신까지 닿도록 호출 상한을 잡음
-    rows = _fetch_ohlcv_paged(ex, symbol, timeframe, total_bars, max_calls=min(400, total_bars // 100 + 20))
+    rows = _fetch_ohlcv_paged(ex, _mkt_symbol(ex, symbol), timeframe, total_bars,
+                              max_calls=min(400, total_bars // 100 + 20))
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
     df = df.drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
     df["ts"] = pd.to_datetime(df["ts"], unit="ms")
