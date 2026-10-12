@@ -41,7 +41,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-12 v28"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-12 v29"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -49,7 +49,7 @@ TRACK_FILE = "signal_tracking.json"               # 실전 추천 자동 추적 
 LAB_REF_FILE = "lab_reference.json"               # 자동 방어 기준선(연구실 실행 때마다 신호 유형별 과거 성과 저장)
 AUTO_DEFENSE = True                               # 실전 성과가 기준선 아래로 떨어진 신호 유형을 자동 감축·중지
 FALLBACK_LOW_R = -0.3                             # 연구실 기준선이 없을 때 쓰는 보수적 고정 기준(최근 평균 R)
-ENABLED_FAMILIES = {"돌파", "돌파 후 되돌림", "위치 다이버전스"}   # 추천할 신호 유형 (v27: 24개월 탐색에서 살아남은 3가지)
+ENABLED_FAMILIES = {"돌파", "돌파 후 되돌림", "추세 눌림목"}   # 추천할 신호 유형 (v29: 5년·두 사이클 교차 검증에서 살아남은 3가지)
 TIMEFRAME = "4h"                                  # 스윙 트레이딩 기준 봉
 OHLCV_LIMIT = 600                                 # 4h 캔들 개수 (EMA200이 제대로 계산되려면 수백 개 필요 — 200개면 첫 봉 비중이 13%나 남음)
 HTF_LIMIT = 300                                   # 일봉 캔들 개수 (일봉 EMA200용)
@@ -66,14 +66,20 @@ TRAIL_ATR = 2.5                                   # (예전 규칙) 나머지는
 # - stop_atr: 기준선(박스 경계·되돌림 저점·다이버전스 저점) 너머 몇 ATR에 손절 (진입가에서 최소 MIN_STOP_ATR)
 # - tp_box: 목표1 = 기준선 + 박스 높이 × tp_box / tp_R: 목표1 = 진입가 + 손절폭 × tp_R
 # - hold: 최대 보유 봉 수 (4시간봉 30봉 = 5일, 60봉 = 10일)
+# v29 (5년·2021.10~2026.10, 사이클 A 2021-23 ↔ B 2024-26 교차 검증): 한 사이클에서 고른 설정이 다른 사이클에서도 통한 것만
 EXIT_RULES = {
-    "돌파": {"stop_atr": 0.5, "tp_box": 1.5, "frac": 0.0, "trail": 1.0, "hold": 30},
-    "돌파 후 되돌림": {"stop_atr": 0.5, "tp_box": 2.0, "frac": 0.0, "trail": 0.75, "hold": 30},
-    "위치 다이버전스": {"stop_atr": 0.0, "tp_R": 3.0, "frac": 0.0, "trail": 0.75, "hold": 60},
+    "돌파": {"stop_atr": 0.5, "tp_box": 1.0, "frac": 0.0, "trail": 1.0, "hold": 60},
+    "돌파 후 되돌림": {"stop_atr": 0.0, "tp_box": 2.0, "frac": 0.0, "trail": 0.75, "hold": 60},
+    "추세 눌림목": {"stop_atr": 0.0, "tp_R": 4.0, "frac": 0.0, "trail": 0.75, "hold": 60},
+    "위치 다이버전스": {"stop_atr": 0.0, "tp_R": 3.0, "frac": 0.0, "trail": 0.75, "hold": 60},   # v29 기본 꺼짐(5년 교차 검증 탈락)
 }
 # 새로 넣은 매매법은 위험 절반으로 시작 → 실전 추적 30건 평균이 플러스(기준선 안)면 자동으로 정상 위험
-NEW_FAMILY_RISK = {"돌파 후 되돌림": 0.5, "위치 다이버전스": 0.5}
-LONG_BIASES = ("long", "wait_breakout_long", "range_fade_long", "donchian_long", "st_long", "retest_long", "div_long")
+NEW_FAMILY_RISK = {"돌파 후 되돌림": 0.5, "추세 눌림목": 0.5, "위치 다이버전스": 0.5}
+LONG_BIASES = ("long", "wait_breakout_long", "range_fade_long", "donchian_long", "st_long", "retest_long", "div_long", "pb_long")
+# v29 박스 돌파 진입: 직전 90봉(15일) 박스 · 거래량 20봉 평균의 2배 이상 · 경계 밖 1 ATR 이내 마감(멀리 튄 봉은 추격 안 함)
+BOX_LOOKBACK = 90
+BOX_VOL_MIN = 2.0
+BOX_EXT_ATR = 1.0
 
 # 거래 비용 (Bitget USDT-M 선물 일반 등급 기준. 등급이 다르면 여기서 바꾸세요)
 MAKER_FEE_PCT = 0.02                              # 지정가 진입·목표1 지정가 익절
@@ -1896,7 +1902,8 @@ def _box_arrays(h: np.ndarray, l: np.ndarray, a: np.ndarray, L: int, tol: float,
 
 
 RETEST_PARENT = {"lookback": 90, "tol": 0.8, "touches": 2, "hmin": 2.0, "hmax": 8.0, "vol": 2.0, "ext": 1.0}
-RETEST_WINDOW, RETEST_TOUCH_ATR, RETEST_INVALID_ATR = 3, 0.0, 0.5
+RETEST_WINDOW, RETEST_TOUCH_ATR, RETEST_INVALID_ATR = 3, 0.3, 0.5   # v29: 경계 0.3 ATR 안까지 오면 닿은 것으로
+RETEST_TRIG = "rev"     # v29: 경계 위 양봉 + 직전 봉 고가 위 마감(롱) — 'bull'(양봉만)은 2021-23에서 약했음
 DIV_K, DIV_GAP, DIV_FIRST_RSI, DIV_LEVEL_BARS = 2, (5, 60), 40.0, 60
 
 
@@ -1904,7 +1911,8 @@ def retest_signals(df: pd.DataFrame, reg: Optional[np.ndarray] = None) -> Dict[i
     """돌파 후 되돌림(지지·저항 전환). 반환 {진입 봉: 신호}.
     1) 품질 박스 돌파: 직전 90봉 박스(경계 터치 허용 0.8 ATR, 위·아래 각 2번 이상, 높이 2~8 ATR), 횡보 국면,
        거래량 20봉 평균의 2배 이상, 경계 밖 1 ATR 이내 마감
-    2) 그 뒤 3봉 안에 가격이 경계선까지 되돌아와 닿고(롱: 저가 ≤ 경계) 경계 위에서 양봉 마감 → 그 봉 종가에 진입
+    2) 그 뒤 3봉 안에 가격이 경계선 0.3 ATR 안까지 되돌아오고(롱: 저가 ≤ 경계 + 0.3 ATR) 경계 위 양봉이면서
+       직전 봉 고가 위로 마감 → 그 봉 종가에 진입
        (그 사이 경계 안쪽으로 0.5 ATR 넘게 마감하면 무효)
     기준선(손절 기준) = 돌파 뒤 되돌림 저점(롱)/고점(숏), 목표 높이 = 박스 높이"""
     df = df.reset_index(drop=True)
@@ -1934,18 +1942,52 @@ def retest_signals(df: pd.DataFrame, reg: Optional[np.ndarray] = None) -> Dict[i
                 if c[t] < E_ - RETEST_INVALID_ATR * a[b]:
                     break
                 ext = min(ext, l[t]); touched |= l[t] <= E_ + RETEST_TOUCH_ATR * a[b]
-                fire = touched and c[t] > E_ and c[t] > o[t]
+                fire = touched and c[t] > E_ and c[t] > o[t] and (RETEST_TRIG == "bull" or c[t] > h[t - 1])
             else:
                 if c[t] > E_ + RETEST_INVALID_ATR * a[b]:
                     break
                 ext = min(ext, -h[t]); touched |= h[t] >= E_ - RETEST_TOUCH_ATR * a[b]
-                fire = touched and c[t] < E_ and c[t] < o[t]
+                fire = touched and c[t] < E_ and c[t] < o[t] and (RETEST_TRIG == "bull" or c[t] < l[t - 1])
             if fire:
                 if t not in out:
                     out[t] = {"direction": "long" if dr > 0 else "short", "edge": float(E_),
                               "ref": float(ext if dr > 0 else -ext), "box_h": float(hg[b]), "atr": float(a[t]),
                               "parent": int(b), "box_hi": float(hi[b]), "box_lo": float(lo[b])}
                 break
+    return out
+
+
+PB_RSI_DIP, PB_VOL_MIN, PB_REF_BARS = 40.0, 1.2, 10
+
+
+def pullback_signals(df: pd.DataFrame) -> Dict[int, Dict]:
+    """v29 추세 눌림목·반등 숏. 반환 {진입 봉: 신호}.
+    롱: 50EMA > 200EMA 이고 종가 > 200EMA(상승 추세) · 직전 3봉 중 RSI(14) 최저 < 40(눌림) ·
+        종가가 20EMA를 아래에서 위로 넘어 마감 · 거래량 20봉 평균의 1.2배 이상 → 그 봉 종가에 진입
+    숏: 반대(하락 추세에서 RSI 60 넘게 반등했다가 20EMA 아래로 다시 마감). 기준선(손절) = 최근 10봉 최저가/최고가"""
+    df = df.reset_index(drop=True)
+    h, l, c, v = (df[k].to_numpy(float) for k in ("high", "low", "close", "volume"))
+    n = len(c)
+    if n < 210:
+        return {}
+    a = _atr_array(h, l, c)
+    cs = pd.Series(c)
+    e20, e50, e200 = (cs.ewm(span=k_, adjust=False).mean().to_numpy() for k_ in (20, 50, 200))
+    r = _rsi_array(c, 14)
+    va = pd.Series(v).shift(1).rolling(20).mean().to_numpy()
+    rmin3 = pd.Series(r).shift(1).rolling(3).min().to_numpy(); rmax3 = pd.Series(r).shift(1).rolling(3).max().to_numpy()
+    lo10 = pd.Series(l).rolling(PB_REF_BARS).min().to_numpy(); hi10 = pd.Series(h).rolling(PB_REF_BARS).max().to_numpy()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rv = np.where(va > 0, v / va, 1.0)
+        up = ((e50 > e200) & (c > e200) & (rmin3 < PB_RSI_DIP) & (c > e20) & np.r_[False, c[:-1] <= e20[:-1]]
+              & (rv >= PB_VOL_MIN))
+        dn = ((e50 < e200) & (c < e200) & (rmax3 > 100 - PB_RSI_DIP) & (c < e20) & np.r_[False, c[:-1] >= e20[:-1]]
+              & (rv >= PB_VOL_MIN))
+    out: Dict[int, Dict] = {}
+    for i in np.flatnonzero(up | dn):
+        lg = bool(up[i])
+        out[int(i)] = {"direction": "long" if lg else "short", "ref": float(lo10[i] if lg else hi10[i]), "atr": float(a[i]),
+                       "rsi_ext": float(rmin3[i] if lg else rmax3[i]), "rel_vol": float(rv[i])}
     return out
 
 
@@ -2019,6 +2061,17 @@ def build_retest_setup(symbol: str, exchange_id: str, df: pd.DataFrame, btc_df: 
     note = (f"박스({fmt_range(s['box_lo'])}~{fmt_range(s['box_hi'])}) {side} 뒤 경계 {fmt_range(s['edge'])}까지 되돌림 → "
             f"경계 {'위' if s['direction'] == 'long' else '아래'} 마감 확인")
     return _v27_setup("돌파 후 되돌림", "retest", s, symbol, exchange_id, df, btc_df, price, alt_df, note)
+
+
+def build_pullback_setup(symbol: str, exchange_id: str, df: pd.DataFrame, btc_df: pd.DataFrame, price: float,
+                         alt_df: Optional[pd.DataFrame] = None) -> Optional["CoinSetup"]:
+    s = pullback_signals(df).get(len(df) - 1)
+    if not s:
+        return None
+    lg = s["direction"] == "long"
+    note = (f"{'상승' if lg else '하락'} 추세(50·200EMA) 속 {'눌림' if lg else '반등'}(RSI {s['rsi_ext']:.0f}) 뒤 "
+            f"20EMA {'위로' if lg else '아래로'} 다시 마감 · 거래량 {s['rel_vol']:.1f}배 · 손절 기준 최근 10봉 {'저점' if lg else '고점'}")
+    return _v27_setup("추세 눌림목", "pb", s, symbol, exchange_id, df, btc_df, price, alt_df, note)
 
 
 def build_divergence_setup(symbol: str, exchange_id: str, df: pd.DataFrame, btc_df: pd.DataFrame, price: float,
@@ -2117,7 +2170,7 @@ def build_setup(symbol: str, exchange_id: str, df: pd.DataFrame, btc_df: pd.Data
                          live_status="chase" if is_chase else "ready", rs_alt=rs_alt)
 
     # ---------------- 횡보: 유효한 박스에서만
-    box = detect_box(df, a)
+    box = detect_box(df, a, lookback=BOX_LOOKBACK)
     if not box["valid"]:
         _rej("no_box")
         return None
@@ -2148,18 +2201,18 @@ def build_setup(symbol: str, exchange_id: str, df: pd.DataFrame, btc_df: pd.Data
                          poc_conf, rs, asym, sweep_confluence=sweep_conf, atr=a,
                          live_status="chase" if is_chase else "ready", rs_alt=rs_alt, tags=tg)
 
-    # (A) 돌파: 마지막 완성봉이 박스 밖에서 마감 + 거래량 1.5배 이상 → 봉 마감 직후 시장가(apply_breakout_entry)
-    #     v27: 기울기 필터 없음(검증에서 효과 없음) · 손절 = 경계 너머 0.5 ATR(진입가에서 최소 1 ATR, 진입 때 다시 계산)
-    #     · 목표1 = 경계 + 박스 높이 1.5배(닿으면 팔지 않고 추적 손절로 전환)
+    # (A) 돌파: 마지막 완성봉이 박스 밖에서 마감 + 거래량 2배 이상 + 경계 밖 1 ATR 이내 → 봉 마감 직후 시장가
+    #     v29: 직전 90봉 박스 · 손절 = 경계 너머 0.5 ATR(진입가에서 최소 1 ATR) · 목표1 = 경계 + 박스 높이 1배
+    #     (닿으면 팔지 않고 손절을 진입가로 올린 뒤 1 ATR 추적) · 최대 60봉(10일)
     xr = EXIT_RULES["돌파"]
-    if last_close > hi and rel_vol >= 1.5:
+    if last_close > hi and rel_vol >= BOX_VOL_MIN and last_close - hi <= BOX_EXT_ATR * a:
         s_ = _make("long", "wait_breakout_long", hi, hi - xr["stop_atr"] * a, hi + xr["tp_box"] * h,
                    hi + (xr["tp_box"] + 1.0) * h, f"{box_tag} 상단 돌파(거래량 {rel_vol:.1f}배) 후 리테스트")
         if s_:
             s_.level, s_.box_h = hi, h
             set_exit_rule(s_, "돌파")
         return s_
-    if last_close < lo and rel_vol >= 1.5:
+    if last_close < lo and rel_vol >= BOX_VOL_MIN and lo - last_close <= BOX_EXT_ATR * a:
         s_ = _make("short", "wait_breakout_short", lo, lo + xr["stop_atr"] * a, lo - xr["tp_box"] * h,
                    lo - (xr["tp_box"] + 1.0) * h, f"{box_tag} 하단 이탈(거래량 {rel_vol:.1f}배) 후 리테스트")
         if s_:
@@ -2358,7 +2411,7 @@ def watch_candidate(df: pd.DataFrame, htf_trend: RegimeType, live: float) -> Opt
     a = atr(df)
     if not a or np.isnan(a) or a <= 0:
         return None
-    box = detect_box(df, a)
+    box = detect_box(df, a, lookback=BOX_LOOKBACK)
     if not box["valid"]:
         return None
     last = float(df["close"].iloc[-1])
@@ -2577,6 +2630,10 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
                 x_ = build_retest_setup(symbol, exchange_id, df, btc_df, live, alt_al)
                 if x_:
                     extra.append(x_)
+            if "추세 눌림목" in ENABLED_FAMILIES:
+                x_ = build_pullback_setup(symbol, exchange_id, df, btc_df, live, alt_al)
+                if x_:
+                    extra.append(x_)
             if "위치 다이버전스" in ENABLED_FAMILIES:
                 x_ = build_divergence_setup(symbol, exchange_id, df, btc_df, live, alt_al)
                 if x_:
@@ -2642,14 +2699,14 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
     # (v27 새 매매법도 제외 — 손절·목표가 검증한 규칙으로 정해져 있어 손익비 필터 없이 검증했음)
     passed = []
     for x in setups:
-        if SETUP_FAMILY.get(x.bias) in ("신고점 돌파", "추적선 전환", "돌파 후 되돌림", "위치 다이버전스") or \
+        if SETUP_FAMILY.get(x.bias) in ("신고점 돌파", "추적선 전환", "돌파 후 되돌림", "위치 다이버전스", "추세 눌림목") or \
                 x.rr_ratio >= (1.3 if (x.poc_confluence or x.sweep_confluence) else 1.5):
             apply_breakout_entry(x)
             cap_ = x.rr_cap if x.rr_cap is not None else x.rr_ratio
             if x.bias.startswith("wait_breakout") and cap_ >= BOX_RR_MAX:
                 _rej("rr_too_far")
                 continue
-            x.market_entry = x.bias.startswith(("donchian", "retest_", "div_")) or "즉시 진입" in x.entry_note
+            x.market_entry = x.bias.startswith(("donchian", "retest_", "div_", "pb_")) or "즉시 진입" in x.entry_note
             passed.append(x)
         else:
             _rej("low_rr")
@@ -2987,7 +3044,7 @@ def lab_reference_from(lab: Dict) -> Dict:
     var = (lab.get("config") or {}).get("donchian_variant", "atr")
     don_key = next((k for k, v in DON_KEYS.items() if v == var), "donchian")
     for key, src in (("base", "base"), ("immediate", "immediate"), ("donchian", don_key), ("supertrend", "supertrend"),
-                     ("retest", "retest"), ("div", "div")):
+                     ("retest", "retest"), ("pb", "pb"), ("div", "div")):
         r = [x["R"] for x in lab["trades"].get(src, [])]
         if len(r) >= 20:
             ref[key] = {"mu": float(np.mean(r)), "sd": float(np.std(r)), "n": len(r), "R": [round(x, 4) for x in r[-1000:]]}
@@ -3014,7 +3071,7 @@ def _family_ref(ref: Optional[Dict], fam: str):
     if not ref:
         return None
     key = {"돌파": "base", "신고점 돌파": "donchian",
-           "추적선 전환": "supertrend", "돌파 후 되돌림": "retest", "위치 다이버전스": "div"}.get(fam)
+           "추적선 전환": "supertrend", "돌파 후 되돌림": "retest", "위치 다이버전스": "div", "추세 눌림목": "pb"}.get(fam)
     v = ref.get(key) if key else None
     return (v["mu"], v["sd"]) if v else None
 
@@ -3203,7 +3260,8 @@ SETUP_FAMILY = {"long": "추세", "short": "추세", "wait_breakout_long": "돌�
                 "donchian_long": "신고점 돌파", "donchian_short": "신고점 돌파",
                 "st_long": "추적선 전환", "st_short": "추적선 전환",
                 "retest_long": "돌파 후 되돌림", "retest_short": "돌파 후 되돌림",
-                "div_long": "위치 다이버전스", "div_short": "위치 다이버전스"}
+                "div_long": "위치 다이버전스", "div_short": "위치 다이버전스",
+                "pb_long": "추세 눌림목", "pb_short": "추세 눌림목"}
 
 
 def _htf_lookup(df: pd.DataFrame, htf_df: Optional[pd.DataFrame]):
@@ -3273,13 +3331,14 @@ def generate_signals(df: pd.DataFrame, btc_df: pd.DataFrame, htf_df: Optional[pd
 
 def v27_family_signals(df: pd.DataFrame, fam: str, reg: Optional[np.ndarray] = None) -> Dict[int, Dict]:
     """과거 전체 봉의 새 매매법 신호를 simulate_exits 형식으로 (신호 봉 종가에 시장가 진입)."""
-    raw = retest_signals(df, reg) if fam == "돌파 후 되돌림" else divergence_signals(df)
+    raw = (retest_signals(df, reg) if fam == "돌파 후 되돌림" else
+           pullback_signals(df) if fam == "추세 눌림목" else divergence_signals(df))
     closes = df["close"].to_numpy(float)
     xr = EXIT_RULES[fam]
     out: Dict[int, Dict] = {}
     for i, s in raw.items():
         sl, tp1 = v27_levels(fam, s["direction"], float(closes[i]), s["ref"], s.get("box_h"), s["atr"])
-        bias = ("retest_" if fam == "돌파 후 되돌림" else "div_") + s["direction"]
+        bias = {"돌파 후 되돌림": "retest_", "추세 눌림목": "pb_"}.get(fam, "div_") + s["direction"]
         out[i] = {"direction": s["direction"], "bias": bias, "entry": float(closes[i]), "sl": sl, "tp1": tp1,
                   "atr": s["atr"], "is_chase": False, "market": True, "rr": None,
                   "atr_pct": s["atr"] / closes[i] * 100 if closes[i] else None, "tags": [],
@@ -3914,6 +3973,48 @@ def portfolio_tracking(log: Optional[List[Dict]] = None, slip_pct: float = TSM_S
             "start": log[0]["date"], "end": log[-1]["date"]}
 
 
+# ---------- 시장 국면(5년 검증 분류): 표시용 — 국면별로 설정을 바꾸는 건 5년 교차 검증에서 효과가 없어 하지 않음
+PHASE_NAMES = ["대상승", "상승·횡보", "하락·횡보", "대하락"]
+PHASE_RULE = "BTC 일봉 종가 vs 200일 평균 + 60일 수익률(±20%)"
+# 5년(2021.10~2026.10) 검증: v29 세 매매법(수동 시각 09·13·17·21시) 거래당 R, v28 포트폴리오의 그 국면 연환산 수익
+PHASE_STATS = {
+    "대상승": {"long": (237, 0.19), "short": (66, 2.11), "port": "+310%",
+              "note": "포트폴리오가 5년 수익 대부분을 낸 국면이에요. 추천 신호는 같은 설정 그대로"},
+    "상승·횡보": {"long": (199, 0.61), "short": (309, 0.43), "port": "−15%",
+               "note": "추천 신호 성과가 가장 고르게 좋았던 국면이에요. 포트폴리오는 대부분 쉬어요"},
+    "하락·횡보": {"long": (162, 0.41), "short": (338, 0.01), "port": "−8%",
+               "note": "숏 신호가 본전 수준이었던 국면이에요(끄면 두 사이클 결과가 엇갈려 끄지는 않음)"},
+    "대하락": {"long": (25, 0.12), "short": (140, 0.20), "port": "0%(쉼)",
+             "note": "2022년엔 플러스, 2026년엔 마이너스로 사이클마다 달랐어요. 포트폴리오는 관문이 꺼져 쉬어요"},
+}
+
+
+def phase_from_close(btc_close: pd.Series) -> Optional[Dict]:
+    """BTC 일봉 종가(마감된 봉만) → 오늘의 국면"""
+    b = btc_close.dropna()
+    if len(b) < 200:
+        return None
+    sma = b.rolling(200, min_periods=200).mean(); r60 = b / b.shift(60) - 1
+    lab = pd.Series(np.where(b > sma, np.where(r60 >= 0.20, 0, 1), np.where(r60 <= -0.20, 3, 2)), index=b.index)[sma.notna()]
+    k = int(lab.iloc[-1]); days = int((lab.iloc[::-1] == k).cumprod().sum())
+    name = PHASE_NAMES[k]
+    return {"idx": k, "name": name, "close": float(b.iloc[-1]), "sma200": float(sma.iloc[-1]),
+            "gap": float(b.iloc[-1] / sma.iloc[-1] - 1), "r60": float(r60.iloc[-1]), "days": days,
+            "date": b.index[-1], "stats": PHASE_STATS[name]}
+
+
+def market_phase() -> Optional[Dict]:
+    """오늘(마지막 마감 일봉)의 시장 국면. 받지 못하면 None."""
+    for ex_id in EXCHANGES:
+        try:
+            d = drop_unclosed(fetch_ohlcv(ex_id, f"BTC/{QUOTE}", "1d", 300), "1d")
+        except Exception:
+            continue
+        if d is not None and len(d) >= 200:
+            return phase_from_close(d.set_index("ts")["close"])
+    return None
+
+
 # ==========================================================================
 # 성장 시뮬레이터: 실제 거래 결과 분포를 다시 뽑아(부트스트랩) 앞으로의 계좌를 여러 번 시뮬레이션
 # ==========================================================================
@@ -3987,7 +4088,7 @@ LAB_VARIANTS = {"donchian": "신고점 돌파(메이저·약 20일)",
 # (ATR 추적선 전환은 2년 정밀 검증에서 최근 8개월 −0.11R로 탈락 → 후보에서 제외)
 DON_KEYS = {"donchian": "atr", "don_structure": "structure", "don_weekly": "weekly", "don_volume": "volume",
             "don_tsm": "tsm"}
-V27_LAB = {"retest": "돌파 후 되돌림", "div": "위치 다이버전스"}   # v27 새 매매법 (연구실에서 성과 확인·자동 방어 기준선)
+V27_LAB = {"retest": "돌파 후 되돌림", "pb": "추세 눌림목", "div": "위치 다이버전스"}   # 새 매매법 (연구실에서 성과 확인·자동 방어 기준선)
 LAB_ALPHA = 0.05  # 시험 후보 수로 나눠서 사용 (여러 개를 시험하면 우연히 좋아 보이는 게 나오기 때문)
 
 
@@ -4320,7 +4421,7 @@ def lab_frequency_text(lab: Dict, scan_n: Optional[int] = None) -> str:
     n = scan_n or TOP_N_BY_VOLUME
     pcm = lab.get("per_coin_month", {})
     parts = [f"{name} 약 {pcm.get(key, 0) * n:.0f}건"
-             for key, name in (("base", "박스 돌파"), ("retest", "돌파 후 되돌림"), ("div", "위치 다이버전스"),
+             for key, name in (("base", "박스 돌파"), ("retest", "돌파 후 되돌림"), ("pb", "추세 눌림목"), ("div", "위치 다이버전스"),
                                ("donchian", "신고점 돌파(기본)"), ("don_structure", "구조 기반"), ("don_volume", "거래량 동반"))]
     return f"📅 스캔 {n}개 기준 한 달 예상 거래 수: " + " · ".join(parts)
 

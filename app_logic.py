@@ -33,8 +33,10 @@ BIAS_INFO = {
     "retest_short": ("short", "숏", "🔁 이탈 후 되돌림(경계 저항 확인) · 시장가"),
     "div_long": ("long", "롱", "📐 위치 다이버전스(상승 추세 속 저점) · 시장가"),
     "div_short": ("short", "숏", "📐 위치 다이버전스(하락 추세 속 고점) · 시장가"),
+    "pb_long": ("long", "롱", "📈 추세 눌림목(상승 추세 속 눌림 → 20EMA 위로 회복) · 시장가"),
+    "pb_short": ("short", "숏", "📉 반등 숏(하락 추세 속 반등 → 20EMA 아래로 재마감) · 시장가"),
 }
-FAMILY_TAG = {"돌파 후 되돌림": "🔁 돌파 후 되돌림", "위치 다이버전스": "📐 위치 다이버전스"}
+FAMILY_TAG = {"돌파 후 되돌림": "🔁 돌파 후 되돌림", "위치 다이버전스": "📐 위치 다이버전스", "추세 눌림목": "📈 추세 눌림목"}
 
 CSS = """
 .block-container{padding-top:1.1rem;padding-bottom:3rem;max-width:720px}
@@ -169,7 +171,7 @@ def tp1_label(setup) -> str:
 
 def entry_label(setup) -> str:
     """신고점 돌파·즉시 진입은 시장가, 나머지는 지정가."""
-    market = setup.bias.startswith(("donchian", "st_", "retest_", "div_")) or "즉시 진입" in (setup.entry_note or "")
+    market = setup.bias.startswith(("donchian", "st_", "retest_", "div_", "pb_")) or "즉시 진입" in (setup.entry_note or "")
     return "진입(시장가)" if market else "진입(지정가)"
 
 
@@ -203,7 +205,25 @@ def exec_rules(setup) -> list:
         else:
             out.append(f"목표1 도달 시: {int(frac * 100)}% 익절 → 남은 물량 손절을 진입가로 → "
                        f"거래소 트레일링 주문(활성화 가격 = 목표1, 되돌림 {cb:.1f}%)")
+    add = pyramid_line(setup)
+    if add:
+        out.append(add)
     return out
+
+
+PYRAMID_X, PYRAMID_RISK_PCT = 1.0, 0.5     # 5년 검증: +1R에서 0.5% 추가 → 두 사이클 모두 연 +15~40%p, 최대 낙폭 +4%p
+
+
+def pyramid_line(setup) -> Optional[str]:
+    """추가 진입(피라미딩) 안내: 4시간봉 종가가 진입가 + 1R을 넘으면 0.5% 위험만큼 한 번 추가, 추가분 손절 = 처음 진입가."""
+    e_, sl_ = getattr(setup, "entry_price", None), getattr(setup, "sl", None)
+    if not e_ or not sl_ or e_ == sl_:
+        return None
+    lg = side_info(setup.bias)[0] == "long"
+    m = int(getattr(setup, "perp_mult", 1) or 1)
+    add = e_ + (1 if lg else -1) * PYRAMID_X * abs(e_ - sl_)
+    return (f"➕ 추가 진입(선택): 4시간봉 종가가 {fmt_price(add * m)} {'위' if lg else '아래'}로 마감하면 계좌 {PYRAMID_RISK_PCT}% 위험만큼 "
+            f"한 번 더 진입 — 추가분 손절 = 처음 진입가 {fmt_price(e_ * m)}, 정리는 본 포지션과 같이(같은 추적 손절)")
 
 
 def elapsed_note(setup):
@@ -219,6 +239,12 @@ def elapsed_note(setup):
     if h < 0:
         return None
     t = f"{int(h * 60)}분" if h < 1 else f"{h:.1f}시간"
+    if setup.bias.startswith("pb_"):    # 5년 검증: 바로 +0.29R · 4시간 늦게 +0.31R · 8시간 늦게 +0.25R
+        if h >= 12:
+            return (f"⛔ 신호 후 {t} — 12시간이 넘었어요. 검증해 본 범위(8시간) 밖이라 건너뛰세요", "stop")
+        if h >= 8:
+            return (f"⚠️ 신호 후 {t} — 8시간 넘게 늦으면 엣지가 줄어요(5년 검증: 8시간 늦게 +0.25R). 리스크를 줄이거나 건너뛰세요", "warn")
+        return (f"⏱ 신호 후 {t} — 추세 눌림목은 늦어도 괜찮아요(5년 검증: 바로 +0.29R · 4시간 늦게 +0.31R · 8시간 늦게 +0.25R)", "ok")
     if setup.bias.startswith("div_"):   # 늦은 진입에 강함 (24개월 검증)
         if h >= 12:
             return (f"⛔ 신호 후 {t} — 12시간이 넘었어요. 검증해 본 범위(8시간) 밖이라 건너뛰세요", "stop")
@@ -228,20 +254,20 @@ def elapsed_note(setup):
                 f"새벽 신호는 아침에 들어가도 돼요", "ok")
     if setup.bias.startswith("retest_"):
         if h >= ELAPSED_STOP_H:
-            return (f"⛔ 신호 후 {t} — 진입 비권장. 되돌림 확인 뒤 늦게 들어가면 엣지가 반으로 줄어요(검증: 바로 +1.24R → 4시간 늦게 +0.63R)", "stop")
+            return (f"⛔ 신호 후 {t} — 진입 비권장. 되돌림 확인 뒤 늦게 들어가면 엣지가 줄어요(5년 검증: 바로 +0.48R → 4시간 늦게 +0.32R)", "stop")
         if h >= ELAPSED_WARN_H:
-            return (f"⚠️ 신호 후 {t} — 엣지가 줄고 있어요(검증: 바로 +1.24R → 4시간 늦게 +0.63R). 리스크를 줄이거나 건너뛰세요", "warn")
-        return (f"⏱ 신호 후 {t} — 지금 진입이 가장 좋아요(검증: 봉 마감 직후 +1.24R)", "ok")
+            return (f"⚠️ 신호 후 {t} — 엣지가 줄고 있어요(5년 검증: 바로 +0.48R → 4시간 늦게 +0.32R). 리스크를 줄이거나 건너뛰세요", "warn")
+        return (f"⏱ 신호 후 {t} — 지금 진입이 가장 좋아요(5년 검증: 봉 마감 직후 +0.48R)", "ok")
     don = setup.bias.startswith("donchian")
     if don and h >= 1:
         return (f"⛔ 신호 후 {t} — 신고점 돌파는 1시간 안에 들어가야 해요(2시간 넘으면 검증 결과 마이너스). 건너뛰세요", "stop")
     if h >= ELAPSED_STOP_H:
-        return (f"⛔ 신호 후 {t} — 진입 비권장. 늦게 따라 들어간 돌파는 엣지가 크게 줄어요(검증: 바로 +0.83R → 4시간 늦게 +0.46R)", "stop")
+        return (f"⛔ 신호 후 {t} — 진입 비권장. 늦게 따라 들어간 돌파는 엣지가 크게 줄어요(5년 검증: 바로 +0.51R → 4시간 늦게 +0.38R → 8시간 +0.30R)", "stop")
     if h >= ELAPSED_WARN_H:
-        return (f"⚠️ 신호 후 {t} — 엣지가 줄었어요. 리스크를 줄이거나 건너뛰세요(검증: 바로 +0.83R → 4시간 늦게 +0.46R)", "warn")
+        return (f"⚠️ 신호 후 {t} — 엣지가 줄었어요. 리스크를 줄이거나 건너뛰세요(5년 검증: 바로 +0.51R → 4시간 늦게 +0.38R)", "warn")
     if h >= 1:
-        return (f"⏱ 신호 후 {t} — 아직 괜찮지만 엣지가 줄기 시작했어요(검증: 늦을수록 줄어 4시간 늦으면 +0.46R)", "ok")
-    return (f"⏱ 신호 후 {t} — 지금 진입이 가장 좋아요(검증: 봉 마감 직후 +0.83R)", "ok")
+        return (f"⏱ 신호 후 {t} — 아직 괜찮지만 엣지가 줄기 시작했어요(5년 검증: 늦을수록 줄어 4시간 늦으면 +0.38R)", "ok")
+    return (f"⏱ 신호 후 {t} — 지금 진입이 가장 좋아요(5년 검증: 봉 마감 직후 +0.51R)", "ok")
 
 
 def flow_summary_html(regime) -> str:
@@ -461,7 +487,7 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
         warn += (f'<div class="over">📅 {e(setup.event_note)} — 크게 흔들리는 시간대라 권장 리스크를 절반으로 계산했어요. '
                  f'검증에서 이 시간대 진입은 평균 −0.25R이었으니 가능하면 건너뛰세요</div>')
     if getattr(setup, "half_start", False):
-        warn += ('<div class="over">🌱 새 매매법(v27) — 실전 기록이 쌓이기 전이라 리스크를 절반으로 낮춰 수량을 계산했어요 '
+        warn += ('<div class="over">🌱 새 매매법 — 실전 기록이 쌓이기 전이라 리스크를 절반으로 낮춰 수량을 계산했어요 '
                  '(실전 추적 30건 평균이 플러스면 자동으로 정상 리스크)</div>')
     if getattr(setup, "trial", False):
         warn += ('<div class="over">🧪 시험 운용 신호 — 리스크를 ¼로 낮춰 수량을 계산했어요 '

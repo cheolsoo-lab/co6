@@ -61,7 +61,7 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-12 v28"
+APP_VERSION = "2026-10-12 v29"
 st.title("▲△▲ ▲△▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
@@ -173,14 +173,15 @@ with st.expander("⚙️ 설정"):
     auto_def = st.checkbox("🛡 자동 방어 (실전 성과가 나빠진 신호 유형은 리스크 절반 → 계속 나쁘면 자동 중지)",
                            value=True, key="auto_def")
     _fam_default = {} if "fams" in st.session_state else {
-        "default": ["돌파", "돌파 후 되돌림", "위치 다이버전스"]
+        "default": ["돌파", "돌파 후 되돌림", "추세 눌림목"]
     }
-    fams = st.multiselect("추천할 신호 유형", ["돌파", "돌파 후 되돌림", "위치 다이버전스", "신고점 돌파", "추세", "박스 역매매"],
+    fams = st.multiselect("추천할 신호 유형", ["돌파", "돌파 후 되돌림", "추세 눌림목", "위치 다이버전스", "신고점 돌파", "추세", "박스 역매매"],
                           key="fams",
-                          help="박스 돌파: 모든 알트(BTC 제외), 가장 강하고 꾸준한 신호. "
-                               "돌파 후 되돌림·위치 다이버전스: v27에서 추가(24개월 탐색·교차 검증 통과), 실전 30건 전까지 위험 절반. "
-                               "신고점 돌파: 메이저 전용이고 봉 마감 후 1시간 안에 들어가야 해서 자동 매매 때 권장. "
-                               "추세·박스 역매매는 근거가 약해요.", **_fam_default)
+                          help="v29(5년·2021.10~2026.10, 2021-23 ↔ 2024-26 두 사이클 교차 검증)에서 살아남은 3가지가 기본이에요. "
+                               "박스 돌파: 15일(90봉) 박스·거래량 2배. 돌파 후 되돌림: 품질 박스 돌파 뒤 경계 재확인. "
+                               "추세 눌림목: 상승 추세 속 눌림 롱·하락 추세 속 반등 숏(새로 추가, 실전 30건 전까지 위험 절반). "
+                               "위치 다이버전스는 2021-23 사이클에서 마이너스라 기본에서 뺐어요. "
+                               "신고점 돌파·추세·박스 역매매는 근거가 약해요.", **_fam_default)
     if store["lab_cfg"]:
         st.caption("🧪 연구실 적용 설정: " + cmr.lab_config_text(store["lab_cfg"]))
         if st.button("연구실 설정 초기화"):
@@ -772,11 +773,35 @@ def render_simulator() -> None:
                    "거래당 성과가 조금씩 줄어드는 것까지 반영했어요. 과거·최근 성과가 앞으로도 이어진다는 가정이라 참고용이에요.")
 
 
+def get_phase():
+    """오늘의 시장 국면(하루 한 번). 실패하면 None — 화면에 표시만 하고 설정은 바꾸지 않음."""
+    key = str(cmr.current_candle_start("1d"))
+    if store.get("phase_key") != key:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                store["phase"] = cmr.market_phase()
+        except Exception:
+            store["phase"] = None
+        store["phase_key"] = key
+    return store.get("phase")
+
+
+def phase_html(ph) -> str:
+    s = ph["stats"]
+    (nl, rl), (ns, rs) = s["long"], s["short"]
+    return (f'<div class="allot">🧭 <b>시장 국면: {ph["name"]}</b> ({ph["days"]}일째) — BTC {ph["close"]:,.0f} · '
+            f'200일 평균 대비 {ph["gap"]:+.1%} · 60일 수익률 {ph["r60"]:+.1%}<br>'
+            f'<span class="k">5년 검증 이 국면 성과: 추천 신호 롱 {nl}건 {rl:+.2f}R{" (표본 적음)" if nl < 100 else ""} · '
+            f'숏 {ns}건 {rs:+.2f}R{" (표본 적음)" if ns < 100 else ""} · '
+            f'포트폴리오 연환산 {s["port"]} — {s["note"]}. 국면별로 설정을 바꾸는 건 5년 교차 검증에서 효과가 없어 '
+            f'설정은 그대로예요.</span></div>')
+
+
 def render_today() -> None:
     now_kst = pd.Timestamp.now(tz="UTC").tz_localize(None) + pd.Timedelta(hours=9)
     st.markdown(f"### 📅 {now_kst:%m월 %d일} 오늘의 투자")
     st.caption(f"⏱ 박스 돌파·돌파 후 되돌림은 봉 마감 직후(01·05·09·13·17·21시) 바로 시장가로 들어갈 때 가장 좋아요 — "
-               f"2시간이 지나면 엣지가 줄고, 4시간이 넘으면 건너뛰세요. 📐 위치 다이버전스는 8시간 안이면 늦게 들어가도 괜찮아요 · "
+               f"2시간이 지나면 엣지가 줄고, 4시간이 넘으면 건너뛰세요. 📈 추세 눌림목은 8시간 안이면 늦게 들어가도 괜찮아요 · "
                f"다음 신호 갱신 {kst(cmr.next_candle_close(res_tf))}")
     live_refresh_if_due()
     r = store["result"]
@@ -819,6 +844,9 @@ def render_today() -> None:
                 f'📊 <b>전체 노출</b>: 신규 진입 ${sig_notional:,.0f} + 포트폴리오 보유 ${port_notional:,.0f} '
                 f'= 계좌의 <b>{lev:.1f}배</b> · 신규 진입이 모두 손절되면 −${sig_risk:,.0f} (계좌의 {sig_risk / balance * 100:.1f}%)'
                 f'</div>', unsafe_allow_html=True)
+    ph = get_phase()
+    if ph:
+        st.markdown(phase_html(ph), unsafe_allow_html=True)
     nxt = cmr.next_events(n=3)
     if ev_now:
         st.warning(f"📅 이벤트 위험 시간대: {cmr.event_text(ev_now)} — 발표 {cmr.EVENT_PRE_H}시간 전부터 {cmr.EVENT_POST_H}시간 "
@@ -888,10 +916,14 @@ with st.expander("📖 용어 / 사용법"):
     st.markdown(
         "- **진입(지정가)**: 이 가격에 지정가 주문을 걸어요. 시장가로 쫓아 들어가지 않는 게 핵심입니다.\n"
         "- **손절**: 이 가격에 닿으면 무조건 정리. 수량은 '손절 시 손실이 계좌의 리스크 %'가 되도록 계산돼 있어요.\n"
-        "- **청산 계획(v27)**: 목표1(추적 시작)에 닿아도 팔지 않고 손절을 진입가로 올림 → 이후 최고가(롱)·최저가(숏)에서 "
-        "카드에 적힌 폭(박스 돌파 1 ATR, 되돌림·다이버전스 0.75 ATR)만큼 되돌리면 전량 정리. 최대 보유 5일(다이버전스 10일). "
+        "- **청산 계획(v29)**: 목표1(추적 시작)에 닿아도 팔지 않고 손절을 진입가로 올림 → 이후 최고가(롱)·최저가(숏)에서 "
+        "카드에 적힌 폭(박스 돌파 1 ATR, 되돌림·눌림목 0.75 ATR)만큼 되돌리면 전량 정리. 최대 보유 10일(60봉). "
         "진입 직후 손절 주문과 트레일링 주문(활성화 가격 = 목표1)을 함께 걸어두면 돼요.\n"
-        "- **🔁 돌파 후 되돌림 / 📐 위치 다이버전스**: v27에서 추가한 매매법. 실전 추적 30건 평균이 플러스가 될 때까지 위험 절반.\n"
+        "- **➕ 추가 진입(선택)**: 4시간봉 종가가 진입가 + 1R(손절폭만큼 유리)을 넘으면 계좌 0.5% 위험만큼 한 번 더. 추가분 손절 = 처음 진입가, "
+        "정리는 본 포지션과 같이. 5년 검증 두 사이클 모두 수익↑·낙폭 +4%p.\n"
+        "- **🔁 돌파 후 되돌림 / 📈 추세 눌림목**: 실전 추적 30건 평균이 플러스가 될 때까지 위험 절반.\n"
+        "- **🧭 시장 국면**: BTC 일봉이 200일 평균 위·아래인지와 60일 수익률(±20%)로 나눈 4가지. 5년 검증에서 국면마다 설정을 "
+        "바꾸는 건 효과가 없어 표시만 해요(국면별 과거 성과 참고용).\n"
         "- **손익비**: (목표1까지 거리) ÷ (손절까지 거리).\n"
         "- **상태**: ✅ 진입가 근처 / ⏳ 추격 구간(대기) / ❌ 무효(손절선을 먼저 넘음) / ⌛ 놓침(목표1에 먼저 닿음). "
         "가격만 자동 갱신하고, 신호 자체는 봉 마감 때만 새로 계산해요.\n"
