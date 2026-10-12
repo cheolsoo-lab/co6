@@ -41,7 +41,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-12 v29.2"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-12 v29.4"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -398,12 +398,38 @@ def _mkt_symbol(ex, symbol: str) -> str:
     return sw if sw in mk else symbol
 
 
+# v29.4: 분석 차트 = Bitget 선물. 5년 비교(현물 분석 vs 선물 분석, 둘 다 선물로 체결)에서 선물 분석이 나쁘지 않았고
+# (수동 시각 거래당 +0.35R → +0.40R, 우연 범위 안), 실제 거래 상품을 분석하는 게 원칙이라 PC·폰 모두 선물 차트로 통일.
+# 가격은 현물 단위로 맞춰서(1000PEPE 선물 → 1000으로 나눔) 나머지 계산·표시는 그대로. 연구용 과거 자료 내보내기는 현물 그대로.
+ANALYZE_ON_PERP = True
+_LAST_PERPS: set = set()
+
+
+def _route(ex, exchange_id: str, symbol: str):
+    """(실제 조회 심볼, 가격 배수). 선물 분석이면 Bitget 거래소 조회를 그 코인의 USDT 무기한 선물로 보냄."""
+    if ":" in symbol:
+        return symbol, 1
+    if ANALYZE_ON_PERP and exchange_id == "bitget":
+        perps = _LAST_PERPS
+        if not perps:
+            try:
+                perps = bitget_perp_symbols()
+            except Exception:
+                perps = set()
+        if perps:
+            p, m = perp_match(symbol, perps)
+            if p:
+                return p, m
+    return _mkt_symbol(ex, symbol), 1
+
+
 def _last_prices(ex_id: str, syms: List[str]) -> Dict[str, float]:
-    """한 거래소의 여러 심볼 현재가 {심볼: 가격}. 현물·선물(위 _mkt_symbol로 바뀐 것)을 나눠 한 번씩 조회."""
+    """한 거래소의 여러 심볼 현재가 {심볼: 가격}. 현물·선물(위 _route로 바뀐 것)을 나눠 한 번씩 조회. 가격은 현물 단위."""
     ex = _get_ex(ex_id)
-    real = {s: _mkt_symbol(ex, s) for s in syms}
+    routed = {s: _route(ex, ex_id, s) for s in syms}
+    real = {s: r for s, (r, _) in routed.items()}
     groups: Dict[bool, List[str]] = {}
-    for r in real.values():
+    for r in dict.fromkeys(real.values()):
         groups.setdefault(":" in r, []).append(r)
     tickers: Dict = {}
     for is_swap, g in groups.items():
@@ -413,11 +439,11 @@ def _last_prices(ex_id: str, syms: List[str]) -> Dict[str, float]:
             params = ({"type": "swap", "productType": "USDT-FUTURES"} if ex_id == "bitget" else {"type": "swap"}) if is_swap else {}
             tickers.update(ex.fetch_tickers(None, params) or {})
     out: Dict[str, float] = {}
-    for s, r in real.items():
+    for s, (r, m) in routed.items():
         t = tickers.get(r) or {}
         last = t.get("last") or t.get("close")
         if last:
-            out[s] = float(last)
+            out[s] = float(last) / m
     return out
 
 
@@ -495,7 +521,7 @@ def fetch_ohlcv(exchange_id: str, symbol: str, timeframe: Optional[str] = None,
         raise RuntimeError("ccxt가 설치되어 있지 않습니다. `pip install ccxt` 실행 후 재시도하세요.")
     try:
         ex = _get_ex(exchange_id)
-        msym = _mkt_symbol(ex, symbol)
+        msym, mult = _route(ex, exchange_id, symbol)
         try:
             raw = _fetch_ohlcv_paged(ex, msym, timeframe, limit)
         except Exception:
@@ -504,6 +530,24 @@ def fetch_ohlcv(exchange_id: str, symbol: str, timeframe: Optional[str] = None,
             raw = ex.fetch_ohlcv(msym, timeframe=timeframe, limit=min(limit, 1000))
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
         df = df.drop_duplicates(subset="ts").sort_values("ts").tail(limit).reset_index(drop=True)
+        if exchange_id == "bitget" and ":" in msym and timeframe in _PERP_GRAN:
+            # v29.4: ccxt 버전에 따라 선물 캔들 중간이 빠지거나 덜 오는 경우 → 거래소 원본 API로 다시 받기
+            tf_ms = ex.parse_timeframe(timeframe) * 1000
+            gappy = len(df) > 1 and bool((np.diff(df["ts"].to_numpy(np.int64)) != tf_ms).any())
+            if gappy or len(df) < 0.9 * limit:
+                try:
+                    alt = _bitget_perp_history(msym, timeframe, int(limit * tf_ms / 86_400_000) + 2)
+                    if len(alt) and (gappy or len(alt) > len(df)):
+                        alt = alt[["ts", "open", "high", "low", "close", "volume"]].copy()
+                        alt["ts"] = (alt["ts"] - pd.Timestamp("1970-01-01")) // pd.Timedelta(milliseconds=1)
+                        live = df[df["ts"] > alt["ts"].iloc[-1]] if len(df) else df
+                        df = pd.concat([alt, live], ignore_index=True).drop_duplicates(subset="ts") \
+                            .sort_values("ts").tail(limit).reset_index(drop=True)
+                except Exception as e:
+                    print(f"[warn] {msym} 선물 캔들 보완 실패: {e}")
+        if mult != 1:   # 선물 표기(예: 1000PEPE) → 현물 단위
+            df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float) / mult
+            df["volume"] = df["volume"].astype(float) * mult
         df["ts"] = pd.to_datetime(df["ts"], unit="ms")
         return df
     except Exception as e:
@@ -1317,7 +1361,7 @@ def get_spread_pct(exchange_id: str, symbol: str) -> Optional[float]:
     슬리피지 리스크가 큰 종목을 걸러내는 데 사용."""
     try:
         ex = _get_ex(exchange_id)
-        ticker = ex.fetch_ticker(_mkt_symbol(ex, symbol))
+        ticker = ex.fetch_ticker(_route(ex, exchange_id, symbol)[0])
         bid, ask = ticker.get("bid"), ticker.get("ask")
         if not bid or not ask:
             return None
@@ -2361,6 +2405,8 @@ def bitget_perp_symbols() -> set:
         perps = {m["symbol"] for m in ex.markets.values() if _perp_tradable(m)}
         if perps:
             PERPS_SOURCE = "live"
+            _LAST_PERPS.clear()
+            _LAST_PERPS.update(perps)
             try:
                 with open(PERPS_CACHE_FILE, "w", encoding="utf-8") as f:
                     json.dump({"saved": str(utc_now()), "perps": sorted(perps)}, f)
@@ -2375,6 +2421,8 @@ def bitget_perp_symbols() -> set:
         if utc_now() - pd.Timestamp(c["saved"]) <= pd.Timedelta("7D") and c.get("perps"):
             PERPS_SOURCE = "cache"
             print("[warn] Bitget 선물 목록 조회 실패 → 최근 저장본 사용")
+            _LAST_PERPS.clear()
+            _LAST_PERPS.update(c["perps"])
             return set(c["perps"])
     except Exception:
         pass
@@ -2558,6 +2606,12 @@ def build_universe(top_n: Optional[int] = None, perps: Optional[set] = None) -> 
             if len(alt) > len(kept):
                 kept, basis = alt, "Bitget 선물 거래대금(현물 목록 부족 → 보완)"
                 UNIVERSE_DIAG["선물 캔들로 분석"] = sum(1 for _, i in kept[:top_n] if i.get("candle") == "선물")
+        if ANALYZE_ON_PERP:     # v29.4: 모든 코인을 Bitget 선물 차트로 분석 (fetch_ohlcv가 선물로 보냄)
+            for _, info in kept:
+                info["src"] = "bitget"
+                info["candle"] = "선물"
+            UNIVERSE_DIAG["분석 차트"] = "Bitget 선물(v29.4)"
+            UNIVERSE_DIAG.pop("선물 캔들로 분석", None)
         ranked = kept
         by_src: Dict[str, int] = {}
         for _, src in miss:
@@ -4830,6 +4884,141 @@ def export_research_data(n_coins: int = 100, days: int = 730, include_1h: bool =
             z.writestr("premium_1h.csv", pf_[["exchange", "symbol", "ts", "open", "high", "low", "close", "volume"]]
                        .to_csv(index=False, float_format="%.10g"))
         meta["econ_events_kst"] = ECON_EVENTS
+        z.writestr("meta.json", json.dumps(meta, ensure_ascii=False, default=str))
+    return buf.getvalue()
+
+
+_PERP_GRAN = {"1h": "1H", "4h": "4H", "1d": "1Dutc"}   # Bitget 선물 봉 단위(일봉은 UTC 00시 기준)
+
+
+def _bitget_perp_history(perp: str, tf: str, days: int, mark: bool = False) -> pd.DataFrame:
+    """v29.3: Bitget 선물 과거 캔들을 빈틈없이 받기 (현물 대비 검증용).
+    ccxt 통합 함수는 오래된 구간에서 요청 개수와 거래소 한도(200개)가 어긋나 구간을 건너뛰는 경우가 있어,
+    거래소 원본 API(history-candles)를 '창 하나 = 190봉, 한 봉 겹치기'로 직접 이어 받음. mark=True면 마크 가격 캔들."""
+    ex = _get_ex("bitget")
+    ex.load_markets()
+    m = ex.market(perp)
+    dur = ex.parse_timeframe(tf) * 1000
+    span = (85 if tf == "1d" else 190) * dur                  # 거래소 제한: 한 번에 200개·90일 이내
+    now = ex.milliseconds()
+    t = now - days * 86_400_000
+    t -= t % dur
+    if m.get("created"):
+        t = max(t, int(m["created"]) - (int(m["created"]) % dur))   # 상장 전 구간은 건너뜀
+    name = "HistoryMarkCandles" if mark else "HistoryCandles"
+    fn = getattr(ex, f"publicMixGetV2MixMarket{name}", None) or \
+        getattr(ex, f"public_mix_get_v2_mix_market_{'history_mark_candles' if mark else 'history_candles'}")
+    rows: List = []
+    empty_run, fails = 0, 0
+    while t < now:
+        e = min(t + span, now)
+        try:
+            r = fn({"symbol": m["id"], "productType": "USDT-FUTURES", "granularity": _PERP_GRAN[tf],
+                    "startTime": str(t), "endTime": str(e), "limit": "200"})
+            data = (r or {}).get("data") or []
+            fails = 0
+        except Exception as ex_:
+            fails += 1
+            if fails >= 3:
+                raise RuntimeError(f"{perp} {tf} 조회 실패: {str(ex_)[:80]}")
+            time.sleep(1.0)
+            continue
+        if data:
+            need = 4 if mark else 6                              # 시가·고가·저가·종가 (+ 거래량·거래대금)
+            for x in data:
+                vals = [float(v) for v in list(x[1:1 + need]) if v not in (None, "")]
+                rows.append([int(x[0])] + vals + [np.nan] * (need - len(vals)))
+            empty_run = 0
+        elif rows:
+            empty_run += 1
+            if empty_run > 20:      # 받는 도중 오래 비면(상장 폐지 후 등) 멈춤
+                break
+        t = e - dur                 # 한 봉 겹쳐서 다음 창(경계 봉 누락 방지, 중복은 아래에서 제거)
+        if e >= now:
+            break
+    cols = ["ts", "open", "high", "low", "close"] + ([] if mark else ["volume", "quote_volume"])
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame([r_[:len(cols)] for r_ in rows], columns=cols)
+    df = df.drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
+    df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+    return drop_unclosed(df, tf)
+
+
+def _export_cached_perp(perp: str, tf: str, days: int, mark: bool = False) -> pd.DataFrame:
+    """선물 캔들도 내보내기 캐시(12시간) 사용 — 도중에 끊겨도 다시 누르면 이어서."""
+    import tempfile
+    folder = os.path.join(tempfile.gettempdir(), "cmr_export_cache")
+    path = os.path.join(folder, re.sub(r"[^A-Za-z0-9]+", "_", f"bgperp_{'mark_' if mark else ''}{perp}_{tf}_{days}") + ".pkl")
+    try:
+        if os.path.exists(path) and time.time() - os.path.getmtime(path) < EXPORT_CACHE_HOURS * 3600:
+            return pd.read_pickle(path)
+    except Exception:
+        pass
+    df = _bitget_perp_history(perp, tf, days, mark)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        df.to_pickle(path)
+    except Exception:
+        pass
+    return df
+
+
+def export_perp_data(n_coins: int = 100, days: int = 1825, include_mark: bool = True, progress_cb=None) -> bytes:
+    """v29.3: Bitget USDT-M 선물 캔들 묶음(zip) — 현물로 검증한 매매법을 실제 거래 상품(선물) 차트로 다시 검증하기 위한 자료.
+    거래량 상위 n_coins개(+BTC)의 선물 4시간봉·일봉(+선택: 마크 가격 4시간봉 — 손절 발동 기준 비교용).
+    가격은 선물 표기 그대로(예: 1000PEPE) — meta.json의 mult로 나누면 현물 단위."""
+    import io as _io
+    import zipfile
+    perps = bitget_perp_symbols()
+    if not perps:
+        raise RuntimeError("Bitget 선물 목록을 받지 못했어요. 잠시 후 다시 시도해 주세요.")
+    uni = build_universe(n_coins + 1, perps)
+    syms = [f"BTC/{QUOTE}"] + [x for x in uni if x != f"BTC/{QUOTE}"][:n_coins]
+    meta = {"kind": "bitget_perp", "made_at": str(utc_now()), "version": APP_VERSION, "days": days,
+            "universe_diag": dict(UNIVERSE_DIAG), "coins": [], "errors": [],
+            "note": "가격·거래량은 Bitget 선물 표기 그대로. 현물 단위 = 가격/mult, 거래량×mult. volume=코인 수량, quote_volume=USDT"}
+    parts: Dict[str, List[pd.DataFrame]] = {"4h": [], "1d": [], "mark_4h": []}
+    jobs = len(syms) * (3 if include_mark else 2)
+    k = 0
+    for sym in syms:
+        info = uni.get(sym) or {}
+        perp, mult = info.get("perp"), int(info.get("mult", 1))
+        if not perp:
+            perp, mult = perp_match(sym, perps)
+        if not perp:
+            meta["errors"].append(f"{sym}: Bitget 선물 없음")
+            k += 3 if include_mark else 2
+            continue
+        bars = {}
+        for tf, mark in (("4h", False), ("1d", False)) + ((("4h", True),) if include_mark else ()):
+            if progress_cb:
+                progress_cb(k, jobs, f"{'마크 ' if mark else ''}{tf} {perp.split(':')[0]}")
+            k += 1
+            try:
+                d = _export_cached_perp(perp, tf, days + (300 if tf == "1d" else 50), mark)
+            except Exception as e:
+                meta["errors"].append(f"{sym} {'mark ' if mark else ''}{tf}: {str(e)[:80]}")
+                continue
+            if d is not None and len(d):
+                parts["mark_4h" if mark else tf].append(d.assign(symbol=sym))
+                bars[("mark_" if mark else "") + tf] = len(d)
+        meta["coins"].append({"symbol": sym, "perp": perp, "mult": mult, "rank": len(meta["coins"]),
+                              "vol24h": info.get("vol"), **{f"bars_{a}": b for a, b in bars.items()}})
+    meta["errors"] = meta["errors"][:60]
+    if progress_cb:
+        progress_cb(1, 1, "압축 중")
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        for key, frames in parts.items():
+            if not frames:
+                continue
+            df = pd.concat(frames, ignore_index=True)
+            df["ts"] = (pd.to_datetime(df["ts"]) - pd.Timestamp("1970-01-01")) // pd.Timedelta(milliseconds=1)
+            cols = ["symbol", "ts", "high", "low", "close"] if key == "mark_4h" else \
+                ["symbol", "ts", "open", "high", "low", "close", "volume", "quote_volume"]
+            z.writestr(f"perp_{key}.csv" if key != "mark_4h" else "perp_mark_4h.csv",
+                       df[cols].to_csv(index=False, float_format="%.10g"))
         z.writestr("meta.json", json.dumps(meta, ensure_ascii=False, default=str))
     return buf.getvalue()
 

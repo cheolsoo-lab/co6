@@ -61,7 +61,7 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-12 v29.2"
+APP_VERSION = "2026-10-12 v29.4"
 st.title("▲△▲ ▲△▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
@@ -383,12 +383,56 @@ def render_macro_validation() -> None:
                "검증해요. 4시간봉 근거와 도미넌스 기록은 과거 데이터가 없어 제외돼요.")
 
 
+def render_export_perp() -> None:
+    """v29.3: Bitget 선물 캔들 내보내기 (현물로 검증한 매매법을 선물 차트로 재검증)."""
+    x1, x2 = st.columns(2)
+    p_n = x1.slider("코인 수 (거래량 순위)", 30, 100, 100, step=10, key="exp_n")
+    p_days = x2.selectbox("기간", [730, 1095, 1825], index=2, key="exp_days",
+                          format_func=lambda d: f"{d // 365}년" + (" (2022 하락장 포함)" if d >= 1825 else ""))
+    p_mark = st.checkbox("마크 가격 4시간봉 포함 (손절 발동 기준 '최신 가격 vs 마크 가격' 비교용)", value=True, key="exp_mark")
+    _y = p_days / 365
+    st.caption(f"담기는 것: 상위 {p_n}개 + BTC의 Bitget 선물 4시간봉·일봉{' · 마크 가격 4시간봉' if p_mark else ''} (선물 표기 가격 그대로). "
+               f"예상 소요 약 {round(p_n * _y * (0.04 + (0.025 if p_mark else 0)) + 3)}분 · "
+               f"예상 크기 약 {max(2, round(p_n * _y * (0.03 + (0.015 if p_mark else 0)) + 1))}MB")
+    st.caption("⏳ PC에서 받으세요(폰 서버는 해외라 Bitget 응답이 제한될 수 있어요). 도중에 끊겨도 같은 설정으로 다시 누르면 "
+               "12시간 안에 받은 코인은 건너뛰고 이어서 받아요.")
+    if st.button("▶ 선물 데이터 만들기", use_container_width=True):
+        prog = st.progress(0.0, text="Bitget 선물 데이터 받는 중...")
+
+        def cb(i: int, n: int, sym: str) -> None:
+            prog.progress(min(i / max(n, 1), 1.0), text=f"{sym} ({i}/{n})")
+
+        with store["lock"]:
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    store["export_perp"] = cmr.export_perp_data(p_n, p_days, p_mark, cb)
+                now_ = pd.Timestamp.now(tz="UTC").tz_localize(None) + pd.Timedelta(hours=9)
+                store["export_perp_name"] = f"research_perp_{p_n}coins_{p_days}d_{now_:%Y%m%d_%H%M}.zip"
+                store["export_perp_error"] = None
+            except Exception:
+                store["export_perp_error"] = traceback.format_exc() + "\n" + buf.getvalue()
+        prog.empty()
+    if store.get("export_perp_error"):
+        st.error("선물 데이터 만들기 중 오류가 발생했어요. 아래 내용을 그대로 복사해서 알려주세요.")
+        st.code(store["export_perp_error"], language=None)
+    if store.get("export_perp"):
+        st.download_button(f"⬇ 다운로드 ({len(store['export_perp']) / 1e6:.1f}MB)", data=store["export_perp"],
+                           file_name=store["export_perp_name"], mime="application/zip", use_container_width=True)
+        st.caption("받은 zip 파일을 그대로 Claude 대화창에 올려주세요. 압축을 풀 필요 없어요.")
+
+
 def render_export() -> None:
     st.markdown("#### 📦 연구용 데이터 내보내기")
     st.caption("거래소 API로 과거 데이터를 받아 파일 하나(zip)로 저장해요. 이 파일을 Claude와의 대화에 올리면 "
                "Claude가 직접 수십 가지 변형을 돌려 정밀 검증할 수 있어요.")
-    ex_mode = st.radio("내보낼 데이터", ["4시간봉·일봉 (기본, 최대 5년)", "1시간봉 전용 (최대 2년)"], horizontal=True, key="ex_mode",
-                       help="1시간봉 전용: 1시간봉 매매법을 찾는 연구용. 1시간봉과 일봉(거시 흐름 계산용)만 담아요")
+    ex_mode = st.radio("내보낼 데이터", ["4시간봉·일봉 (기본, 최대 5년)", "1시간봉 전용 (최대 2년)", "Bitget 선물 캔들 (현물 비교용)"],
+                       horizontal=True, key="ex_mode",
+                       help="1시간봉 전용: 1시간봉 매매법을 찾는 연구용. 1시간봉과 일봉(거시 흐름 계산용)만 담아요\n\n"
+                            "Bitget 선물 캔들: v29.4부터 앱은 선물 차트로 분석해요. 선물 차트로 매매법을 다시 검증할 때 쓰는 자료예요")
+    if ex_mode.startswith("Bitget 선물"):
+        render_export_perp()
+        return
     only_1h = ex_mode.startswith("1시간봉")
     x1, x2 = st.columns(2)
     ex_n = x1.slider("코인 수 (거래량 순위)", 30, 100, 60 if only_1h else 100, step=10, key="ex_n1" if only_1h else "ex_n",
@@ -602,8 +646,8 @@ def recommendations() -> None:
         st.warning(f"⚠️ 스캔한 코인이 설정({top_n}개)보다 적은 {fs_['universe']}개예요. 거래소 응답: {_ud.get('거래량 목록', '확인 불가')}. "
                    "실패한 거래소가 있으면 서버 위치 때문에 막힌 거예요(Streamlit Cloud는 해외 서버). 추천이 PC와 다를 수 있어요.")
     elif str(_ud.get("순위 기준", "")).startswith("Bitget 선물"):
-        st.caption(f"ⓘ 이 서버에선 거래소 현물 목록이 지역 제한으로 비어 있어서 Bitget 선물 거래대금 순위로 코인을 골랐어요"
-                   f"(선물 시세로 분석 {_ud.get('선물 캔들로 분석', 0)}개). 매매법·설정은 같고, PC와 코인 순위가 조금 다를 수 있어요.")
+        st.caption("ⓘ 이 서버에선 거래소 현물 목록이 지역 제한으로 비어 있어서 Bitget 선물 거래대금 순위로 코인을 골랐어요. "
+                   "분석 차트(Bitget 선물)·매매법·설정은 PC와 같고, 코인 순위만 조금 다를 수 있어요.")
     mf_ = r.get("macro_filter") or {}
     if mf_.get("blocked_side"):
         st.info(f"🧭 거시 필터: 일봉 흐름 점수 {mf_['score']:+.2f} → {mf_['blocked_side']} 신호 제외 중"
