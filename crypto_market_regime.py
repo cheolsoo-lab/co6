@@ -41,7 +41,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-12 v29.4"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-12 v29.5"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -1640,8 +1640,14 @@ REJECT_LABELS = {
 }
 
 
+_REJ_SYM: Dict[str, List[str]] = {}   # v29.5: 코인별 제외 사유 (PC·폰 비교용 '코인 찾기')
+_CUR_SYM = {"sym": None}
+
+
 def _rej(reason: str) -> None:
     _REJECTS[reason] = _REJECTS.get(reason, 0) + 1
+    if _CUR_SYM["sym"]:
+        _REJ_SYM.setdefault(_CUR_SYM["sym"], []).append(reason)
 
 
 def _order_targets(direction: str, tp1: float, tp2: float, a: float):
@@ -2508,7 +2514,17 @@ def _perp_ranked_universe(perps: set, pvol: Dict[str, float]) -> List[tuple]:
             continue
         base_p = p.split("/")[0]
         sym, m = f"{base_p}/{QUOTE}", 1               # 기본: 선물 이름 그대로(현물 없으면 선물 캔들)
-        if not spot_ok(sym):
+        if ANALYZE_ON_PERP:
+            # v29.5: 선물로 분석하므로 현물 목록과 상관없이 같은 규칙 → PC·폰에서 코인 이름·가격 단위가 같음
+            # (1000PEPE → PEPE·1000배. 단, 'PEPE' 이름의 다른 선물이 따로 있으면 헷갈리지 않게 그대로 둠)
+            for mm in sorted(_PERP_MULTS[1:], reverse=True):
+                pref = str(mm)
+                rest = base_p[len(pref):]
+                if base_p.startswith(pref) and rest and not rest[0].isdigit():
+                    if f"{rest}/{QUOTE}:{QUOTE}" not in perps:
+                        sym, m = f"{rest}/{QUOTE}", mm
+                    break
+        elif not spot_ok(sym):
             for mm in sorted(_PERP_MULTS[1:], reverse=True):   # 1000PEPE → 현물 PEPE(가격 1000배 표기)가 있으면 그 현물로
                 pref = str(mm)
                 rest = base_p[len(pref):]
@@ -2520,7 +2536,7 @@ def _perp_ranked_universe(perps: set, pvol: Dict[str, float]) -> List[tuple]:
             continue
         seen.add(sym)
         out.append((sym, {"src": "bitget", "vol": float(pv), "perp": p, "mult": m,
-                          "candle": "현물" if spot_ok(sym) else "선물"}))
+                          "candle": "선물" if ANALYZE_ON_PERP or not spot_ok(sym) else "현물"}))
     return out
 
 
@@ -2535,12 +2551,37 @@ def perp_match(symbol: str, perps: set):
     return None, 1
 
 
-def build_universe(top_n: Optional[int] = None, perps: Optional[set] = None) -> Dict[str, Dict]:
-    """3개 거래소 거래량 목록을 합쳐 '합산 거래량 순위' 상위 top_n개를 반환 {심볼: {src, vol, perp, mult}}.
+def build_universe(top_n: Optional[int] = None, perps: Optional[set] = None, rank_by: str = "auto") -> Dict[str, Dict]:
+    """스캔할 코인 상위 top_n개 {심볼: {src, vol, perp, mult}}.
+    v29.5: 선물 분석(ANALYZE_ON_PERP)이면 Bitget 선물 24h 거래대금 순위로 고름 → PC·폰이 같은 Bitget 응답 하나로
+    같은 코인 목록을 만듦 (예전엔 PC는 현물 거래대금, 폰은 선물 거래대금 순위라 목록이 달랐음).
+    rank_by="spot"(연구용 과거 자료 내보내기)이거나 선물 거래대금 조회가 실패하면 예전 방식(현물 거래대금 순위)."""
+    top_n = top_n or TOP_N_BY_VOLUME
+    if perps and ANALYZE_ON_PERP and rank_by == "auto":
+        pvol = bitget_perp_volumes()
+        kept = _perp_ranked_universe(perps, pvol) if pvol else []
+        if len(kept) >= min(top_n, 10):
+            UNIVERSE_DIAG.clear()
+            _VOL_DIAG.clear()
+            out = dict(kept[:top_n])
+            UNIVERSE_DIAG.update({"순위 기준": "Bitget 선물 거래대금(PC·폰 공통)", "분석 차트": "Bitget 선물",
+                                  "Bitget 선물": f"{len(perps)}개({PERPS_SOURCE}) · 거래대금 300만$ 이상 "
+                                                 f"{sum(1 for v in pvol.values() if v >= MIN_QUOTE_VOLUME_USDT)}",
+                                  "배수 표기(1000PEPE 등)": sum(1 for i in out.values() if i["mult"] > 1),
+                                  "스캔 대상": len(out)})
+            return out
+        print("[warn] Bitget 선물 거래대금 조회 실패 → 현물 거래대금 순위로 대신")
+    out = _build_universe_spot(top_n, perps, perp_src=bool(perps and ANALYZE_ON_PERP and rank_by == "auto"))
+    if perps and ANALYZE_ON_PERP and rank_by == "auto":
+        UNIVERSE_DIAG["순위 기준"] = "현물 거래대금(선물 거래대금 조회 실패 → 대신)"
+    return out
+
+
+def _build_universe_spot(top_n: int, perps: Optional[set], perp_src: bool) -> Dict[str, Dict]:
+    """(v29.4까지의 방식) 3개 거래소 거래량 목록을 합쳐 '합산 거래량 순위' 상위 top_n개를 반환 {심볼: {src, vol, perp, mult}}.
     - 캔들은 EXCHANGES 순서상 먼저 나온 거래소(기본 Bitget)에서 받음
     - 순위는 거래소들 중 가장 큰 24h 거래대금 기준
     - perps를 주면 Bitget 선물로 거래 가능한 코인만 남긴 뒤 순위를 자름 → N은 '실제 거래 가능한 N개'"""
-    top_n = top_n or TOP_N_BY_VOLUME
     merged: Dict[str, Dict] = {}
     # v29.1: 선물 목록이 있으면 거래대금 목록을 자르지 않고 받음. 거래소 현물 상위권에 선물 없는 종목(토큰화 주식 등)이
     # 많아서, 2배만 받으면 다른 거래소 목록을 못 받는 환경(예: 해외 서버의 Streamlit Cloud)에서 N개보다 적게 남았음
@@ -2606,7 +2647,7 @@ def build_universe(top_n: Optional[int] = None, perps: Optional[set] = None) -> 
             if len(alt) > len(kept):
                 kept, basis = alt, "Bitget 선물 거래대금(현물 목록 부족 → 보완)"
                 UNIVERSE_DIAG["선물 캔들로 분석"] = sum(1 for _, i in kept[:top_n] if i.get("candle") == "선물")
-        if ANALYZE_ON_PERP:     # v29.4: 모든 코인을 Bitget 선물 차트로 분석 (fetch_ohlcv가 선물로 보냄)
+        if perp_src:     # v29.4: 모든 코인을 Bitget 선물 차트로 분석 (fetch_ohlcv가 선물로 보냄)
             for _, info in kept:
                 info["src"] = "bitget"
                 info["candle"] = "선물"
@@ -2783,6 +2824,8 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
     1차로 모든 코인의 캔들을 받아 알트 지수를 만든 뒤(알트 지수 대비 상대강도용), 2차로 코인별 신호를 계산.
     스캔이 끝나면 LAST_SCAN_STATS에 필터별 제외 개수와 시장 참여도(상승/하락 추세 코인 수)를 남깁니다."""
     _REJECTS.clear()
+    _REJ_SYM.clear()
+    _CUR_SYM["sym"] = None
     if btc_df is None:
         btc_df, _ = split_live(fetch_btc_df())
     perps = bitget_perp_symbols() if BITGET_ONLY else set()
@@ -2798,6 +2841,7 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
     loaded = []  # 1차: 캔들 받기
     watch: List[Dict] = []
     for idx, (symbol, info) in enumerate(items):
+        _CUR_SYM["sym"] = symbol
         if progress_cb:
             progress_cb(idx, 2 * n_items, f"데이터 {symbol}")
         try:
@@ -2815,6 +2859,7 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
 
     setups: List[CoinSetup] = []
     for idx, (symbol, info, df, live) in enumerate(loaded):  # 2차: 신호 계산
+        _CUR_SYM["sym"] = symbol
         exchange_id = info["src"]
         if progress_cb:
             progress_cb(n_items + idx, 2 * n_items, symbol)
@@ -2916,6 +2961,7 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
     # (v27 새 매매법도 제외 — 손절·목표가 검증한 규칙으로 정해져 있어 손익비 필터 없이 검증했음)
     passed = []
     for x in setups:
+        _CUR_SYM["sym"] = x.symbol
         if SETUP_FAMILY.get(x.bias) in ("신고점 돌파", "추적선 전환", "돌파 후 되돌림", "위치 다이버전스", "추세 눌림목") or \
                 x.rr_ratio >= (1.3 if (x.poc_confluence or x.sweep_confluence) else 1.5):
             apply_breakout_entry(x)
@@ -2941,14 +2987,36 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
             if dropped or dropped_w:
                 _REJECTS["perp_untradable"] = len(dropped) + len(dropped_w)
                 print(f"[skip] Bitget 선물 시세 없음(거래 불가): {[x.symbol for x in dropped] + [w['symbol'] for w in dropped_w]}")
+            for x in dropped:
+                _REJ_SYM.setdefault(x.symbol, []).append("perp_untradable")
             passed = [x for x in passed if x not in dropped]
             watch = [w for w in watch if w not in dropped_w]
             for w in watch:
                 w["perp_ok"] = True
         else:
             perp_verified = False
+    _CUR_SYM["sym"] = None
+    # v29.5: 코인별 결과 (스캔 순위 · 추천/관찰/제외 사유) — PC와 폰 결과를 코인 단위로 비교
+    watch_syms = {w["symbol"] for w in watch}
+    passed_syms: Dict[str, List[str]] = {}
+    for x in passed:
+        passed_syms.setdefault(x.symbol, []).append(SETUP_FAMILY.get(x.bias, x.bias))
+    coin_status: Dict[str, Dict] = {}
+    for k, (sym, info) in enumerate(items):
+        if sym in passed_syms:
+            res_ = "후보 통과: " + "·".join(passed_syms[sym])
+        elif _REJ_SYM.get(sym):
+            res_ = "제외: " + "·".join(dict.fromkeys(REJECT_LABELS.get(r, r) for r in _REJ_SYM[sym]))
+        elif coin_group(sym) == "BTC":
+            res_ = "BTC는 시장 판단에만 사용"
+        else:
+            res_ = "신호 없음 (이번 봉에 조건을 만족한 매매법 없음)"
+        if sym in watch_syms:
+            res_ += " · 돌파 임박 관찰 중"
+        coin_status[sym] = {"rank": k + 1, "perp": info.get("perp", ""), "status": res_}
     LAST_SCAN_STATS.clear()
-    LAST_SCAN_STATS.update({"universe_diag": dict(UNIVERSE_DIAG), "rejects": dict(_REJECTS), "breadth": dict(breadth),
+    LAST_SCAN_STATS.update({"coin_status": coin_status,
+                            "universe_diag": dict(UNIVERSE_DIAG), "rejects": dict(_REJECTS), "breadth": dict(breadth),
                             "universe": n_items, "passed": len(passed), "alt_index": alt is not None,
                             "watchlist": sorted(watch, key=lambda w: w["dist_atr"]),
                             "perp_source": PERPS_SOURCE if BITGET_ONLY else "off", "perp_verified": perp_verified})
@@ -3366,6 +3434,7 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
     hist_scores = (extras.get("hist") or {}).get("score") or []
     macro_now = hist_scores[-1] if hist_scores else None
     macro_info = {"score": macro_now, "blocked_side": None, "excluded": 0}
+    pre_macro = list(all_setups)
     if MACRO_FILTER and macro_now is not None and abs(macro_now) >= 0.25:
         blocked_long = macro_now <= -0.25
         macro_info["blocked_side"] = "롱" if blocked_long else "숏"
@@ -3402,6 +3471,35 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
     active = [x for x in all_setups if x.health != "paused"]
     paused = [x for x in all_setups if x.health == "paused"]
     setups = cap_correlated_exposure(active, risk_cfg) if active else []
+    # v29.5: 코인별 최종 결과 + 비교용 지문 (PC·폰에서 결과가 다를 때 어디서 갈렸는지 바로 보이게)
+    cs = stats.get("coin_status") or {}
+    fin_ids = {id(x) for x in setups}
+    kept_ids = {id(x) for x in all_setups}
+    for x in pre_macro:
+        d = cs.get(x.symbol)
+        if d is None:
+            continue
+        fam = SETUP_FAMILY.get(x.bias, x.bias)
+        if id(x) in fin_ids:
+            tag = f"✅ 추천 ({fam})"
+        elif id(x) not in kept_ids:
+            tag = f"거시 흐름과 반대라 제외 ({fam})"
+        elif x.health == "paused":
+            tag = f"자동 방어로 중지된 유형 ({fam})"
+        else:
+            tag = f"같은 방향 동시 추천 개수 제한으로 빠짐 ({fam})"
+        d["final"] = (d.get("final", "") + " · " if d.get("final") else "") + tag
+    paused_f = sorted({SETUP_FAMILY.get(x.bias, "") for x in paused} | {f for f, h in health.items() if h.get("state") == "paused"})
+    stats["fingerprint"] = {
+        "버전": APP_VERSION, "봉": TIMEFRAME,
+        "기준 봉 마감(한국)": f"{utc_now().floor(TIMEFRAME) + pd.Timedelta(hours=9):%m-%d %H:%M}",
+        "코인": f"{stats.get('universe', 0)}개 · {(stats.get('universe_diag') or {}).get('순위 기준', '-')}",
+        "신호 유형": "·".join(f for f in ("돌파", "돌파 후 되돌림", "추세 눌림목", "위치 다이버전스", "신고점 돌파", "추적선 전환")
+                           if f in ENABLED_FAMILIES),
+        "거시 필터": ("켬" if MACRO_FILTER else "끔") + (f"({macro_info['blocked_side']} 제외 중)" if macro_info.get("blocked_side") else ""),
+        "자동 방어": ("켬" if AUTO_DEFENSE else "끔") + (f"(중지: {'·'.join(paused_f)})" if paused_f else ""),
+        "손실 한도": breaker or "정상", "동시 추천 최대": risk_cfg.max_concurrent_setups,
+    }
     try:  # 새 추천 추적 (자동 중지된 신호도 계속 추적해야 성과 회복을 알 수 있음)
         track_new_setups(setups + paused, tracks)
         _save_tracks(tracks)
@@ -4763,7 +4861,7 @@ def export_research_data(n_coins: int = 100, days: int = 730, include_1h: bool =
     if ex_id is None:
         raise RuntimeError("과거 데이터를 받을 수 있는 거래소가 없어요")
     perps = bitget_perp_symbols() if BITGET_ONLY else set()
-    uni = build_universe(n_coins + 1, perps or None)
+    uni = build_universe(n_coins + 1, perps or None, rank_by="spot")
     syms = [f"BTC/{QUOTE}"] + [x for x in uni if x != f"BTC/{QUOTE}"][:n_coins]
     parts = {"4h": [], "1d": [], "1h": []}
     meta = {"exchange": ex_id, "made_at": str(utc_now()), "version": APP_VERSION, "days": days,
@@ -4973,7 +5071,7 @@ def export_perp_data(n_coins: int = 100, days: int = 1825, include_mark: bool = 
     perps = bitget_perp_symbols()
     if not perps:
         raise RuntimeError("Bitget 선물 목록을 받지 못했어요. 잠시 후 다시 시도해 주세요.")
-    uni = build_universe(n_coins + 1, perps)
+    uni = build_universe(n_coins + 1, perps, rank_by="spot")   # 현물 연구 자료와 같은 코인 목록
     syms = [f"BTC/{QUOTE}"] + [x for x in uni if x != f"BTC/{QUOTE}"][:n_coins]
     meta = {"kind": "bitget_perp", "made_at": str(utc_now()), "version": APP_VERSION, "days": days,
             "universe_diag": dict(UNIVERSE_DIAG), "coins": [], "errors": [],

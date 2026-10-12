@@ -61,7 +61,7 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-12 v29.4"
+APP_VERSION = "2026-10-12 v29.5"
 st.title("▲△▲ ▲△▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
@@ -129,7 +129,7 @@ with st.expander("⚙️ 설정"):
     max_n = st.slider("같은 방향 동시 추천 최대 개수", 1, 15, 12, key="max_n",
                       help="알트코인은 BTC와 같이 움직여서, 같은 방향을 많이 잡아도 분산이 잘 안 됩니다")
     c5, c6 = st.columns(2)
-    top_n = c5.slider("스캔 코인 수 (3개 거래소 합산 거래량 순위)", 10, 150, 100, key="top_n",
+    top_n = c5.slider("스캔 코인 수 (Bitget 선물 거래대금 순위)", 10, 150, 100, key="top_n",
                       help="과거 검증의 '거래량 구간별' 결과에서 플러스가 확인된 구간까지만 늘리세요. "
                            "바꾼 뒤 '새로 분석'을 눌러야 반영")
     live_sec = c6.selectbox("가격 자동 갱신(초)", [15, 30, 60], index=1, key="live_sec")
@@ -645,7 +645,7 @@ def recommendations() -> None:
     if fs_.get("universe") and fs_["universe"] < 0.8 * top_n:
         st.warning(f"⚠️ 스캔한 코인이 설정({top_n}개)보다 적은 {fs_['universe']}개예요. 거래소 응답: {_ud.get('거래량 목록', '확인 불가')}. "
                    "실패한 거래소가 있으면 서버 위치 때문에 막힌 거예요(Streamlit Cloud는 해외 서버). 추천이 PC와 다를 수 있어요.")
-    elif str(_ud.get("순위 기준", "")).startswith("Bitget 선물"):
+    elif "현물 목록 부족" in str(_ud.get("순위 기준", "")):
         st.caption("ⓘ 이 서버에선 거래소 현물 목록이 지역 제한으로 비어 있어서 Bitget 선물 거래대금 순위로 코인을 골랐어요. "
                    "분석 차트(Bitget 선물)·매매법·설정은 PC와 같고, 코인 순위만 조금 다를 수 있어요.")
     mf_ = r.get("macro_filter") or {}
@@ -997,7 +997,27 @@ with st.expander("📝 매매 결과 기록 (서킷브레이커용)"):
 
 fs = res.get("filter_stats") or {}
 if fs.get("universe"):
-    with st.expander(f"🧮 필터 통과 현황 ({fs.get('universe', 0)}개 → {fs.get('passed', 0)}개)"):
+    with st.expander(f"🧮 필터 통과 현황 · PC·폰 비교 ({fs.get('universe', 0)}개 → {fs.get('passed', 0)}개)"):
+        fp_ = fs.get("fingerprint") or {}
+        if fp_:
+            st.markdown("**비교용 지문** — PC와 폰 결과가 다르면 이 줄부터 같은지 보세요 (기준 봉 시각·코인 수·신호 유형·자동 방어)")
+            st.caption(f"분석 시각 {kst(res['asof_utc'])} · " + " · ".join(f"{k} {v}" for k, v in fp_.items()))
+        cs_ = fs.get("coin_status") or {}
+        if cs_:
+            q_ = st.text_input("🔍 코인 찾기 — 다른 기기에서 추천된 코인 이름을 넣으면 여기서 왜 안 나왔는지 보여줘요 (예: SOL)",
+                               key="coin_find").strip().upper().replace("/USDT", "").replace(":USDT", "")
+            if q_:
+                hits = [(s_, d_) for s_, d_ in cs_.items()
+                        if s_.split("/")[0] == q_ or d_.get("perp", "").split("/")[0] == q_]
+                if not hits:
+                    st.warning(f"{q_}: 이번 스캔 코인 목록({len(cs_)}개)에 없어요 — 거래대금 순위 밖이거나 Bitget 선물이 없는 코인이에요. "
+                               "다른 기기에서 나왔다면 그쪽 '스캔 코인 수'가 더 크거나 순위 기준이 다른 거예요(위 지문 확인).")
+                for s_, d_ in hits:
+                    live_ = [x for x in res.get("setups", []) if x.symbol == s_]
+                    st.info(f"**{s_.split('/')[0]}** · 거래대금 순위 {d_['rank']}위 · {d_['status']}"
+                            + (f" → {d_['final']}" if d_.get("final") else "")
+                            + (" · 지금 상태: " + ", ".join(" ".join(L.STATUS_INFO.get(x.live_status, ("", x.live_status)))
+                                                         for x in live_) if live_ else ""))
         st.caption("각 조건에서 몇 개가 걸러졌는지예요. 한 조건이 거의 다 걸러내거나 아무것도 못 거르면 기준 점검이 필요해요.")
         if fs.get("universe_diag"):
             st.caption("스캔 대상: " + ", ".join(f"{k} {v}" for k, v in fs["universe_diag"].items()))
