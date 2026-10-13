@@ -33,7 +33,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="▲△▲", page_icon="▲△▲", layout="centered",
+st.set_page_config(page_title="▲▲▲", page_icon="▲▲▲", layout="centered",
                    initial_sidebar_state="collapsed")
 st.markdown(f"<style>{L.CSS}</style>", unsafe_allow_html=True)
 
@@ -61,8 +61,8 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-13 v29.7"
-st.title("▲△▲ ▲△▲")
+APP_VERSION = "2026-10-13 v30"
+st.title("▲▲▲ ▲▲▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
 if _engine_ver != APP_VERSION:
@@ -558,7 +558,10 @@ if res_tf == "1h":
 # ---------------------------------------------------------------- 시장 국면
 regime = res["regime"]
 macro_hours = regime.snapshot.get("macro_span_hours", 0.0)
-st.markdown(L.regime_html(regime, macro_hours, res.get("macro_filter")), unsafe_allow_html=True)
+# v29.9: 메인 카드 = 기간별 거시 방향(검증된 판단과 사실·참고를 나눠서). 예전 카드(색·4시간 추세·도미넌스)는 세부 근거로
+st.markdown(L.direction_html(res.get("direction") or {}, res.get("macro_filter")), unsafe_allow_html=True)
+with st.expander("📊 세부 근거 — BTC 4시간 추세·도미넌스·참여도 (검증 전 참고값)"):
+    st.markdown(L.regime_html(regime, macro_hours, res.get("macro_filter"), compact=True), unsafe_allow_html=True)
 if "btc_d" not in regime.snapshot:
     st.caption("ⓘ 이번엔 도미넌스 데이터(CoinGecko·CoinPaprika) 응답을 못 받았어요. "
                "나머지 근거로 정상 판단했고, 다음 갱신 때 다시 시도합니다.")

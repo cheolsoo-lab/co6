@@ -58,6 +58,12 @@ CSS = """
 .conf .hint{opacity:.7;font-size:.72rem}
 .regime .act{margin-top:6px;font-size:.92rem;font-weight:650;line-height:1.45}
 .gauge-lbl.mid{left:50%;transform:translateX(-50%)}
+.drow{margin-top:10px;padding:9px 11px;border-radius:12px;background:rgba(128,128,128,.08);line-height:1.5}
+.drow .h{font-size:.78rem;opacity:.7;font-weight:700}
+.drow .v{font-size:1.05rem;font-weight:800;margin-top:1px}
+.drow .s{font-size:.82rem;opacity:.9;margin-top:3px}
+.drow.main{background:rgba(128,128,128,.13);border:1px solid rgba(128,128,128,.25)}
+.drow.muted .v{font-size:.92rem;font-weight:650;opacity:.85}
 .rnote{margin-top:8px;font-size:.8rem}
 .altv{margin-top:8px;font-size:.84rem;font-weight:600}
 .flow{margin:6px 0 2px;font-size:.88rem;line-height:1.5;padding:8px 10px;border-radius:10px;background:rgba(128,128,128,.08)}
@@ -531,7 +537,70 @@ def macro_trade_line(mf: Optional[Dict]) -> str:
             "· 5년 검증에서 신호 성과가 가장 좋았던 구간(롱 +0.41R · 숏 +0.82R)")
 
 
-def regime_html(regime, macro_hours: float = 0.0, macro_filter: Optional[Dict] = None) -> str:
+DIR_COLOR = {"down": ("#dc2626", "rgba(220,38,38,.10)"), "down_w": ("#f97316", "rgba(249,115,22,.09)"),
+             "flat": ("#6b7280", "rgba(107,114,128,.10)"), "up_w": ("#65a30d", "rgba(101,163,13,.09)"),
+             "up": ("#16a34a", "rgba(22,163,74,.10)")}
+def _reason_txt(r: dict) -> str:
+    """모델 근거 하나를 쉬운 말로: 무엇이 얼마인지 + 오를 확률을 높였는지·낮췄는지"""
+    k, v = r["k"], r["v"]
+    txt = {"r7": f"BTC 최근 7일 {v:+.0%}", "r30": f"BTC 30일 {v:+.0%}", "r90": f"BTC 90일 {v:+.0%}",
+           "d_e50": f"BTC가 50일 평균보다 {abs(v):.0%} {'위' if v >= 0 else '아래'}",
+           "d_s200": f"BTC가 200일선보다 {abs(v):.0%} {'위' if v >= 0 else '아래'}",
+           "breadth": f"20일선 위 알트 {v:.0%}", "macro": f"일봉 흐름 점수 {v:+.2f}",
+           "alt_r30": f"알트 지수 30일 {v:+.0%}",
+           "altbtc_r30": f"알트가 30일간 BTC보다 {abs(v):.0%} {'더 오름' if v >= 0 else '덜 오름'}"}.get(k, f"{k} {v:+.2f}")
+    return f"{txt} → 오를 확률 {'높임 ↑' if r['c'] > 0 else '낮춤 ↓'}"
+
+
+def direction_html(d: dict, macro_filter: Optional[Dict] = None) -> str:
+    """v30 메인 거시 카드 — 검증을 통과한 것만 위에, 약한 참고는 아래로.
+    ① BTC 보유 판단(150일선, 5년 검증 통과) ② 추천 신호 규칙(거시 필터, 검증 통과)
+    ③ 앞으로 2주 기울기(적중 56~58%지만 매매하면 손실 → 참고) ④ 1~3일(어떤 지표도 50% 못 넘음 → 판단 안 함)"""
+    e = html.escape
+    mid, sh, hd = (d or {}).get("mid") or {}, (d or {}).get("short") or {}, (d or {}).get("hold") or {}
+    from crypto_market_regime import BTC_HOLD_MA, BTC_HOLD_STATS
+    sa, sb = BTC_HOLD_STATS["A"], BTC_HOLD_STATS["B"]
+    proof = (f'5년 검증: 2021~23 연 {sa["cagr"]:+.0%}(그냥 보유 {sa["bh_cagr"]:+.0%}) · 최대 낙폭 {sa["mdd"]:.0%}({sa["bh_mdd"]:.0%}) | '
+             f'2024~ 연 {sb["cagr"]:+.0%}({sb["bh_cagr"]:+.0%}) · 낙폭 {sb["mdd"]:.0%}({sb["bh_mdd"]:.0%}) · 수수료·펀딩 포함, 100·200일선도 비슷하게 통과')
+    if hd:
+        if hd["above"]:
+            col, bg = "#16a34a", "rgba(22,163,74,.10)"
+            head = f'✅ BTC 롱 보유 유지 — 일봉 종가가 {BTC_HOLD_MA}일선 위 ({hd["gap"]:+.1%}) · {hd["days"]}일째'
+            todo = (f'할 일: 들고 있기. 매일 오전 9시(일봉 마감) 종가가 {BTC_HOLD_MA}일선(지금 {hd["ma"]:,.0f}) 아래로 마감하면 청산')
+        else:
+            col, bg = "#6b7280", "rgba(107,114,128,.10)"
+            head = f'⏸ BTC 청산·대기 — 일봉 종가가 {BTC_HOLD_MA}일선 아래 ({hd["gap"]:+.1%}) · {hd["days"]}일째'
+            todo = (f'할 일: 현금으로 기다리기. 종가가 {BTC_HOLD_MA}일선(지금 {hd["ma"]:,.0f}) 위로 마감하면 다시 롱. '
+                    '숏은 하지 않기 — 이평선 아래 숏은 2024년 이후 손실이라 검증 탈락')
+        hold = (f'<div class="drow main"><div class="h">BTC 보유 판단 · 검증 통과</div>'
+                f'<div class="v" style="color:{col}">{e(head)}</div><div class="s">{e(todo)}</div>'
+                f'<div class="s" style="opacity:.75">{e(proof)} · {e(hd.get("asof", ""))} 일봉 기준</div></div>')
+    else:
+        col, bg = "#6b7280", "rgba(107,114,128,.10)"
+        hold = ('<div class="drow main"><div class="h">BTC 보유 판단 · 검증 통과</div><div class="v">계산 못 함</div>'
+                '<div class="s">BTC 일봉을 받지 못했어요 — 다음 분석 때 다시 계산해요</div></div>')
+    rule = f'<div class="act" style="margin-top:10px">{macro_trade_line(macro_filter)}</div>'
+    if mid.get("p") is not None:
+        b = mid["bin"]
+        two = (f'<div class="drow muted"><div class="h">앞으로 2주 · 약한 참고</div>'
+               f'<div class="v">{e(mid["label"])} · BTC 오를 확률 {mid["p"]:.0%}</div>'
+               f'<div class="s">과거 이런 확률일 때 BTC 오른 비율 {b["p_up"]:.0%}(평균 {b["mean"]:+.1%}) · 알트 지수 {b["alt_p_up"]:.0%}({b["alt_mean"]:+.1%}). '
+               f'근거: {" · ".join(e(_reason_txt(r)) for r in mid.get("reasons", []))}</div>'
+               f'<div class="s" style="opacity:.7">적중 56~58%로 동전보다 조금 나은 정도 — 이걸로 BTC를 사고팔면 한 기간에서 손실이라 매매엔 쓰지 않아요</div></div>')
+    else:
+        two = (f'<div class="drow muted"><div class="h">앞으로 2주 · 약한 참고</div><div class="v">계산 못 함</div>'
+               f'<div class="s">{e(mid.get("error", "자료 부족"))}</div></div>')
+    r3 = sh.get("r3d")
+    short = (f'<div class="drow muted"><div class="h">앞으로 1~3일</div><div class="v">판단 안 함</div>'
+             f'<div class="s">5년 검증에서 어떤 지표도 50%(동전 던지기)를 넘지 못했어요'
+             + (f' · 사실: 최근 3일 BTC {r3:+.1%}' if r3 is not None else "") + '</div></div>')
+    return (f'<div class="regime" style="background:{bg};border-left:5px solid {col}">'
+            f'<div class="t">🧭 거시 방향 · 지금 할 일</div>{hold}{rule}{two}{short}'
+            f'<div class="unver">지지·저항선, 추세선, 매물대, 오더블록, 피보나치, 라운드 넘버는 5년 검증(31개 코인)에서 아무 가격선보다 '
+            f'반등을 더 잘 하지 않았어요 — 선에서의 반등을 미리 믿고 들어가지 마세요.</div></div>')
+
+
+def regime_html(regime, macro_hours: float = 0.0, macro_filter: Optional[Dict] = None, compact: bool = False) -> str:
     """메인 거시 방향 카드: 한 줄 결론 → 행동 가이드 → 방향 게이지 → 근거 설명 → (횡보) 전환 기준선 → 신뢰도.
     v29.7: 색(큰 흐름 점수)과 글(BTC 일봉·4시간 추세 조합)이 달라 '초록불인데 횡보'처럼 헷갈려서, 제목에 둘을 나눠 쓰고
     실제 추천에 영향을 주는 규칙(거시 필터)과 '색은 진입 신호가 아님'을 함께 보여줌."""
@@ -544,8 +613,10 @@ def regime_html(regime, macro_hours: float = 0.0, macro_filter: Optional[Dict] =
     breakout = ""
     if regime.breakout_up and regime.breakout_down:
         from crypto_market_regime import fmt_range  # 지연 임포트(app_logic 단독 임포트 가능하게)
-        breakout = (f'<div class="brk">⬆ <b>{e(fmt_range(regime.breakout_up))}</b> 돌파 시 상승 전환 · '
-                    f'⬇ <b>{e(fmt_range(regime.breakout_down))}</b> 이탈 시 하락 전환</div>')
+        breakout = (f'<div class="brk">📏 BTC 최근 3일(4시간봉 20개) 범위: 고점 <b>{e(fmt_range(regime.breakout_up))}</b> · '
+                    f'저점 <b>{e(fmt_range(regime.breakout_down))}</b><br><span class="hint">4시간마다 새로 계산돼서 '
+                    f'계속 바뀌는 참고값이에요. 새 저점이 나오면 그 값으로 내려가고, 오래된 저점이 3일 밖으로 빠지면 다시 올라가요. '
+                    f'진입 신호나 전환 기준이 아니에요.</span></div>')
     alt_line = (f'<div class="altv">🪙 {e(regime.alt_view)}</div>' if getattr(regime, "alt_view", "") else "")
     val_line = (f'<div class="valn">📏 {e(regime.validation_note)}</div>' if getattr(regime, "validation_note", "") else "")
     notes = ""
@@ -559,7 +630,7 @@ def regime_html(regime, macro_hours: float = 0.0, macro_filter: Optional[Dict] =
     return (
         f'<div class="regime" style="background:{info["bg"]};border-left:5px solid {info["color"]}">'
         f'<div class="t">{info["emoji"]} 큰 흐름 {BIG_FLOW[regime.overall]} · 지금 {e(regime.headline)}</div>'
-        f'<div class="act">{macro_trade_line(macro_filter)}</div>'
+        + ("" if compact else f'<div class="act">{macro_trade_line(macro_filter)}</div>') +
         f'<div class="act">▶ {e(regime.action)}</div>'
         f'<div class="gauge"><div class="gauge-track">'
         f'<span class="gauge-lbl left">하락</span><span class="gauge-lbl mid">중립</span>'
@@ -570,9 +641,10 @@ def regime_html(regime, macro_hours: float = 0.0, macro_filter: Optional[Dict] =
         f'{breakout}{notes}'
         f'<div class="conf">판단 신뢰도 <b style="color:{conf_color}">{e(regime.confidence_label)}</b>'
         f' <span class="hint">· 근거들이 같은 방향을 가리키는 정도</span></div>'
-        f'<div class="unver">🚦 색은 큰 흐름 참고용이지 진입 신호가 아니에요. 일봉 중심이라 하루 이틀 하락으로는 잘 안 바뀌고, '
-        f'바뀌어도 봉 2개 마감까지 확인 후 바뀌어요. 5년 검증: 일봉 흐름이 강한 상승(+0.25 이상)일 때 앱의 롱 신호도 '
-        f'평균 +0.02R로 이득이 거의 없었어요 — 진입은 추천 카드만.</div>'
+        + ("" if compact else
+           f'<div class="unver">🚦 색은 큰 흐름 참고용이지 진입 신호가 아니에요. 일봉 중심이라 하루 이틀 하락으로는 잘 안 바뀌고, '
+           f'바뀌어도 봉 2개 마감까지 확인 후 바뀌어요. 5년 검증: 일봉 흐름이 강한 상승(+0.25 이상)일 때 앱의 롱 신호도 '
+           f'평균 +0.02R로 이득이 거의 없었어요 — 진입은 추천 카드만.</div>') +
         f'</div>'
     )
 

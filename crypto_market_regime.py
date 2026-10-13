@@ -41,7 +41,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-13 v29.7"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-13 v30"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -679,8 +679,8 @@ class MarketRegime:
     score: float = 0.0            # -1(강한 하락)~+1(강한 상승) 종합 방향 점수
     confidence_label: str = ""    # "높음"/"보통"/"낮음" — 근거들이 서로 얼마나 일치하는지
     explanation: str = ""         # 근거를 풀어 쓴 설명 문장
-    breakout_up: Optional[float] = None    # 횡보일 때: 이 가격 위로 뚫으면 상승 전환으로 볼 기준선
-    breakout_down: Optional[float] = None  # 횡보일 때: 이 가격 아래로 이탈하면 하락 전환으로 볼 기준선
+    breakout_up: Optional[float] = None    # 횡보일 때: 최근 20개 4시간봉(약 3일) BTC 최고가 — 참고값(4시간마다 다시 계산)
+    breakout_down: Optional[float] = None  # 횡보일 때: 최근 20개 4시간봉(약 3일) BTC 최저가 — 참고값
     lean_verified: Optional[bool] = None   # 횡보 기울기 근거가 검증됐는지(=validate_lean_auto 결과 반영 여부)
     daily_trend: RegimeType = "sideways"   # 큰 흐름: BTC 일봉 추세
     action: str = ""                       # 행동 가이드 한 줄
@@ -1094,8 +1094,9 @@ def compose_market_regime(inputs: Dict, breadth: Optional[Dict] = None, commit: 
         breakout_up = float(btc_df["high"].tail(20).max())
         breakout_down = float(btc_df["low"].tail(20).min())
         lean_verified = False
-        action = (f"박스 경계에서만 진입하고 중간 구간은 관망. 위로 {fmt_range(breakout_up)} 돌파 시 롱 쪽, "
-                  f"아래로 {fmt_range(breakout_down)} 이탈 시 숏 쪽으로 무게를 옮기세요")
+        # v29.8: 예전 문구('위로 돌파 시 롱 쪽, 아래로 이탈 시 숏 쪽으로 무게')는 검증 안 된 감 매매 안내였고,
+        # 기준선이 최근 20봉 최고·최저라 4시간마다 따라 움직여 '계속 롱'처럼 읽혔음 → 진입은 추천 카드만으로 안내
+        action = "BTC가 큰 방향 없이 오르내리는 중이에요. 진입은 추천 카드만 — 바로 위 매매 규칙 줄이 실제로 적용되는 규칙이에요"
     elif daily == btc_trend:
         strong = abs(score) >= 0.6
         if btc_trend == "uptrend":
@@ -3608,7 +3609,14 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         _save_tracks(tracks)
     except Exception as e:
         print(f"[warn] 실전 추적 저장 실패: {e}")
+    direction: Dict = {}
+    try:  # v29.9 기간별 거시 방향 (표시용 — 추천 규칙에는 안 씀)
+        bd_ = drop_unclosed(fetch_ohlcv("bitget", f"BTC/{QUOTE}", "1d", 300), "1d")
+        direction = macro_direction(inputs["btc_df"], bd_, LAST_LOADED, macro_now)
+    except Exception as e:
+        print(f"[warn] 거시 방향 계산 실패: {e}")
     return {"regime": regime, "breaker": breaker, "setups": setups, "all_setups": all_setups, "health": health,
+            "direction": direction,
             "trial": {fam: ("승격" if promoted.get(fam) else "시험 운용") for fam in TRIAL_FAMILIES},
             "new_families": {fam: ("정상 위험" if promoted.get(fam) else "위험 절반") for fam in NEW_FAMILY_RISK},
             "macro_filter": macro_info,
@@ -4425,6 +4433,100 @@ def phase_from_close(btc_close: pd.Series) -> Optional[Dict]:
     return {"idx": k, "name": name, "close": float(b.iloc[-1]), "sma200": float(sma.iloc[-1]),
             "gap": float(b.iloc[-1] / sma.iloc[-1] - 1), "r60": float(r60.iloc[-1]), "days": days,
             "date": b.index[-1], "stats": PHASE_STATS[name]}
+
+
+# ==========================================================================
+# v29.9 거시 방향 (기간별) — 5년 검증으로 고른 것만 '판단', 나머지는 사실·참고로만 표시
+#  · 앞으로 2주: BTC 2주 방향 모델(근거 9개 로지스틱 회귀). 사이클 교차 시험(A로 학습→B, B로 학습→A)에서
+#    적중 56%·58%로 단일 지표(30일 수익률 ±5%: 53%·54%)보다 나아 채택. 화면 확률은 '학습에 안 쓴 구간'의 실제 결과.
+#  · 앞으로 1~3일: 후보 4개+다수결 모두 두 사이클 적중 50% 이하 → 판단하지 않고 최근 3일 변화만 표시
+#  · 2달 이상: 후보 모두 2024년 이후 적중 50% 미만 → 200일선 위치만 참고로 표시
+#  · 이 모델로 추천 신호를 거르는 규칙은 미리 정한 기준 미달(2021~23 연수익 감소)이라 추천에는 쓰지 않음
+# ==========================================================================
+MID_MODEL = {"features": ["r7", "r30", "r90", "d_e50", "d_s200", "breadth", "macro", "alt_r30", "altbtc_r30"], "mu": [0.00389, 0.019767, 0.060728, 0.005551, 0.04148, 0.394575, -0.07744, 0.002752, -0.022188], "sd": [0.070751, 0.157028, 0.292612, 0.097733, 0.246853, 0.336633, 0.43512, 0.237498, 0.131868], "coef": [0.153709, 0.441884, 0.258385, -0.412581, -0.405876, -0.165119, 0.198707, 0.164745, -0.324279], "intercept": 0.088111, "bins": [{"lo": 0, "hi": 0.4, "n": 219, "p_up": 0.388, "mean": -0.0221, "alt_p_up": 0.288, "alt_mean": -0.0676}, {"lo": 0.4, "hi": 0.45, "n": 201, "p_up": 0.498, "mean": -0.0027, "alt_p_up": 0.408, "alt_mean": -0.0267}, {"lo": 0.45, "hi": 0.55, "n": 616, "p_up": 0.511, "mean": 0.0057, "alt_p_up": 0.477, "alt_mean": -0.016}, {"lo": 0.55, "hi": 0.6, "n": 329, "p_up": 0.556, "mean": 0.0111, "alt_p_up": 0.483, "alt_mean": 0.004}, {"lo": 0.6, "hi": 1.0, "n": 440, "p_up": 0.586, "mean": 0.006, "alt_p_up": 0.568, "alt_mean": 0.0263}], "trained": "2021-10-19~2026-09-27", "n": 1805}
+BTC_HOLD_MA = 150   # v30: 5년 검증(고정 교차) 통과 — 100·150·200일 모두 비슷, 150일은 두 기간 중 낮은 샤프가 가장 큰 대표값
+BTC_HOLD_STATS = {"A": {"cagr": 0.24, "mdd": -0.37, "bh_cagr": -0.14, "bh_mdd": -0.79},
+                  "B": {"cagr": 0.18, "mdd": -0.31, "bh_cagr": 0.13, "bh_mdd": -0.57}}
+MID_FEAT_KR = {"r7": "BTC 최근 7일", "r30": "BTC 30일", "r90": "BTC 90일", "d_e50": "BTC가 50일 평균보다",
+               "d_s200": "BTC가 200일선보다", "breadth": "20일선 위 알트 비율", "macro": "일봉 흐름 점수",
+               "alt_r30": "알트 지수 30일", "altbtc_r30": "알트/BTC 30일"}
+
+
+def mid_state(p: float) -> tuple:
+    """2주 방향 확률 → (상태 키, 표시 이름)"""
+    if p <= 0.40:
+        return "down", "🔻 하락 우위"
+    if p <= 0.45:
+        return "down_w", "↘ 약한 하락 우위"
+    if p < 0.55:
+        return "flat", "→ 방향 없음"
+    if p < 0.60:
+        return "up_w", "↗ 약한 상승 우위"
+    return "up", "🔺 상승 우위"
+
+
+def macro_direction(btc_4h: pd.DataFrame, btc_daily: Optional[pd.DataFrame], loaded: Dict[str, tuple],
+                    macro_score: Optional[float]) -> Dict:
+    """기간별 거시 방향. btc_4h·btc_daily는 완성봉, loaded는 스캔에서 받은 코인 캔들 {심볼: (거래소, df)}."""
+    out: Dict = {"short": {}, "mid": {}, "long": {}}
+    try:
+        c4 = btc_4h["close"].astype(float)
+        if len(c4) > 18:
+            out["short"] = {"r3d": float(c4.iloc[-1] / c4.iloc[-19] - 1)}
+    except Exception:
+        pass
+    if btc_daily is None or len(btc_daily) < 201:
+        out["mid"]["error"] = "BTC 일봉 부족"
+        return out
+    cd = btc_daily.set_index("ts")["close"].astype(float)
+    sma200 = cd.rolling(200).mean()
+    out["long"] = {"d_s200": float(cd.iloc[-1] / sma200.iloc[-1] - 1), "close": float(cd.iloc[-1]), "sma200": float(sma200.iloc[-1])}
+    # v30: BTC 보유 판단 — 일봉 종가가 150일선 위면 보유, 아래로 마감하면 청산 후 대기 (숏은 검증 탈락)
+    s150 = cd.rolling(BTC_HOLD_MA).mean()
+    ab = (cd > s150)[s150.notna()]
+    if len(ab):
+        run = int(ab.groupby((ab != ab.shift()).cumsum()).cumcount().iloc[-1] + 1)
+        out["hold"] = {"above": bool(ab.iloc[-1]), "ma": float(s150.iloc[-1]), "close": float(cd.iloc[-1]),
+                       "gap": float(cd.iloc[-1] / s150.iloc[-1] - 1), "days": run, "asof": str(cd.index[-1].date())}
+    closes = {}
+    for sym, (_, d) in (loaded or {}).items():
+        b = sym.split("/")[0]
+        if b in ("BTC", "ETH", "XAUT", "PAXG") or d is None or len(d) < 60:
+            continue
+        v = _daily_closes(d)
+        if len(v) >= 40:
+            closes[sym] = v
+    if len(closes) < 10:
+        out["mid"]["error"] = "알트 자료 부족"
+        return out
+    CD = pd.DataFrame(closes).sort_index()
+    alt = (1 + CD.pct_change().clip(-0.5, 0.5).mean(axis=1, skipna=True).fillna(0)).cumprod()
+    last_day = min(cd.index[-1], CD.index[-1])
+    above = pd.Series({k: v.loc[:last_day].iloc[-1] > v.loc[:last_day].ewm(span=20, adjust=False).mean().iloc[-1]
+                       for k, v in closes.items() if len(v.loc[:last_day]) >= 20})
+    cdl = cd.loc[:last_day]
+    altl = alt.loc[:last_day]
+    e50 = cdl.ewm(span=50, adjust=False).mean()
+    ab = (altl / cdl.reindex(altl.index)).dropna()
+    feat = {"r7": cdl.iloc[-1] / cdl.iloc[-8] - 1, "r30": cdl.iloc[-1] / cdl.iloc[-31] - 1, "r90": cdl.iloc[-1] / cdl.iloc[-91] - 1,
+            "d_e50": cdl.iloc[-1] / e50.iloc[-1] - 1, "d_s200": cdl.iloc[-1] / sma200.loc[:last_day].iloc[-1] - 1,
+            "breadth": float(above.mean()), "macro": macro_score,
+            "alt_r30": altl.iloc[-1] / altl.iloc[-31] - 1 if len(altl) > 31 else None,
+            "altbtc_r30": ab.iloc[-1] / ab.iloc[-31] - 1 if len(ab) > 31 else None}
+    if any(feat[k] is None or not np.isfinite(feat[k]) for k in MID_MODEL["features"]):
+        out["mid"]["error"] = "근거 일부 계산 불가(" + ", ".join(k for k in MID_MODEL["features"]
+                                                       if feat[k] is None or not np.isfinite(feat[k])) + ")"
+        return out
+    z = {k: (float(feat[k]) - mu) / sd for k, mu, sd in zip(MID_MODEL["features"], MID_MODEL["mu"], MID_MODEL["sd"])}
+    contrib = {k: c * z[k] for k, c in zip(MID_MODEL["features"], MID_MODEL["coef"])}
+    p = float(1 / (1 + np.exp(-(MID_MODEL["intercept"] + sum(contrib.values())))))
+    key, label = mid_state(p)
+    b = next(x for x in MID_MODEL["bins"] if x["lo"] < p <= x["hi"] or (p <= 0 and x["lo"] == 0))
+    out["mid"] = {"p": p, "state": key, "label": label, "bin": b, "asof": str(last_day.date()), "n_alts": len(closes),
+                  "feat": {k: float(v) for k, v in feat.items()},
+                  "reasons": sorted(({"k": k, "c": float(v), "v": float(feat[k])} for k, v in contrib.items()),
+                                    key=lambda r: -abs(r["c"]))[:3]}
+    return out
 
 
 def market_phase() -> Optional[Dict]:
