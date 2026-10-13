@@ -61,7 +61,7 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-12 v29.5"
+APP_VERSION = "2026-10-13 v29.7"
 st.title("▲△▲ ▲△▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
@@ -558,7 +558,7 @@ if res_tf == "1h":
 # ---------------------------------------------------------------- 시장 국면
 regime = res["regime"]
 macro_hours = regime.snapshot.get("macro_span_hours", 0.0)
-st.markdown(L.regime_html(regime, macro_hours), unsafe_allow_html=True)
+st.markdown(L.regime_html(regime, macro_hours, res.get("macro_filter")), unsafe_allow_html=True)
 if "btc_d" not in regime.snapshot:
     st.caption("ⓘ 이번엔 도미넌스 데이터(CoinGecko·CoinPaprika) 응답을 못 받았어요. "
                "나머지 근거로 정상 판단했고, 다음 갱신 때 다시 시도합니다.")
@@ -946,7 +946,22 @@ if fragment is not None:
 recommendations()
 
 # ---------------------------------------------------------------- 실전 추천 자동 추적
+# v29.6: 화면을 열 때 다른 기기(PC↔폰) 기록을 당겨와 합치고, 진행 중인 기록은 10분마다 다시 계산
+with store["lock"]:
+    try:
+        store["track_refresh"] = cmr.refresh_tracks()
+    except Exception as _e:
+        print(f"[warn] 추적 갱신 실패: {_e}")
 _tracks = cmr.load_tracks()
+_held = [t for t in _tracks if t["status"] == "보유"]
+if _held:
+    with st.expander(f"📌 보유 중 포지션 관리 ({len(_held)}건 · 추천대로 들어갔다면)", expanded=True):
+        st.caption("규칙대로 지금 할 일만 보여줘요. 들어가지 않은 추천은 무시하세요. "
+                   + (f"마지막 계산 {kst(max(t.get('checked', '') or t.get('created', '') for t in _held))}" if any(t.get("checked") for t in _held) else ""))
+        for t_ in sorted(_held, key=lambda x: str(x.get("signal_ts", ""))):
+            title_, lines_ = L.held_position_card(t_)
+            st.markdown(f"**{title_}**\n" + "\n".join(f"- {x}" for x in lines_))
+        st.caption("ⓘ " + L.HOLD_EVIDENCE)
 if _tracks:
     with st.expander(f"📈 실전 추천 추적 ({len(_tracks)}건)"):
         st.caption("앱이 낸 추천을 '그대로 모두 진입했다면'으로 가정하고, 이후 실제 완성봉으로 체결·손절·익절 결과를 "
@@ -958,9 +973,15 @@ if _tracks:
             st.markdown(f"- {n_}")
         recent = [{"코인": t["symbol"], "유형": t["family"], "방향": "롱" if t["direction"] == "long" else "숏",
                    "신호(한국시간)": (pd.Timestamp(t["signal_ts"]) + pd.Timedelta(hours=9)).strftime("%m-%d %H:%M"),
-                   "상태": t["status"], "R": t.get("R")} for t in reversed(_tracks[-12:])]
+                   "상태": t["status"], "R": t.get("R") if t["status"] == "종료" else (
+                       round(t["live"]["R_now"], 2) if t.get("live") and t["live"].get("R_now") is not None else None),
+                   "청산": t.get("reason", ""),
+                   "확인": (pd.Timestamp(t["checked"]) + pd.Timedelta(hours=9)).strftime("%m-%d %H:%M") if t.get("checked") else ""}
+                  for t in reversed(_tracks[-12:])]
         st.dataframe(pd.DataFrame(recent), hide_index=True, use_container_width=True)
-        st.caption("ⓘ 실제 체결 가격·시점과는 조금 다를 수 있어요. Streamlit Cloud는 앱이 재시작되면 기록이 지워질 수 있어요.")
+        st.caption("ⓘ 보유 중인 R은 마지막 4시간봉 종가 기준(아직 안 끝난 값). 'R'·'청산'은 Bitget 선물 완성봉으로 계산하고, "
+                   "PC·폰 기록은 클라우드(Gist)로 합쳐요 — 더 진행된 상태(종료 > 보유 > 대기)가 남아요. "
+                   "실제 체결 가격·시점과는 조금 다를 수 있어요.")
 
 # ---------------------------------------------------------------- 부가 기능
 with st.expander("📖 용어 / 사용법"):

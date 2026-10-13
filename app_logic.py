@@ -6,6 +6,8 @@ import html
 import math
 from typing import Dict, Optional, Tuple
 
+import pandas as pd
+
 REGIME_INFO = {
     "uptrend": {"emoji": "🟢", "title": "상승장", "color": "#16a34a", "bg": "rgba(22,163,74,.13)",
                 "desc": "롱 위주. 급등 추격 말고 눌림목(되돌림 지정가)에서 진입"},
@@ -504,8 +506,35 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
             f'{plan}<div class="foot">{foot}</div>{warn}</div>')
 
 
-def regime_html(regime, macro_hours: float = 0.0) -> str:
-    """메인 거시 방향 카드: 한 줄 결론 → 행동 가이드 → 방향 게이지 → 근거 설명 → (횡보) 전환 기준선 → 신뢰도."""
+BIG_FLOW = {"uptrend": "상승 쪽", "downtrend": "하락 쪽", "sideways": "중립"}
+
+
+def macro_trade_line(mf: Optional[Dict]) -> str:
+    """v29.7: 이 카드가 실제 추천에 주는 영향(거시 필터)을 한 줄로 — 색이 아니라 이 줄이 매매 규칙."""
+    mf = mf or {}
+    sc = mf.get("score")
+    if sc is None:
+        return "📌 매매 규칙: 일봉 흐름 점수를 아직 계산하지 못해 롱·숏 모두 추천해요"
+    if sc >= 0.25:
+        if mf.get("blocked_side") == "숏":
+            return (f"📌 매매 규칙: 일봉 흐름 점수 {sc:+.2f} (+0.25 이상) → <b>숏 추천 제외, 롱만</b> "
+                    "· 5년 검증에서 이 구간 숏은 평균 −0.08R(2021~23 −0.63R)")
+        return (f"📌 일봉 흐름 점수 {sc:+.2f} (+0.25 이상)인데 거시 필터가 꺼져 있어 숏도 추천 중 "
+                "· 5년 검증에서 이 구간 숏은 평균 −0.08R(2021~23 −0.63R)")
+    if sc <= -0.25:
+        if mf.get("blocked_side") == "롱":
+            return (f"📌 매매 규칙: 일봉 흐름 점수 {sc:+.2f} (−0.25 이하) → <b>롱 추천 제외, 숏만</b> "
+                    "· 5년 검증에서 이 구간 롱은 평균 −0.23R")
+        return (f"📌 일봉 흐름 점수 {sc:+.2f} (−0.25 이하)인데 거시 필터가 꺼져 있어 롱도 추천 중 "
+                "· 5년 검증에서 이 구간 롱은 평균 −0.23R")
+    return (f"📌 매매 규칙: 일봉 흐름 점수 {sc:+.2f} (−0.25~+0.25 중립) → <b>롱·숏 모두 추천</b> "
+            "· 5년 검증에서 신호 성과가 가장 좋았던 구간(롱 +0.41R · 숏 +0.82R)")
+
+
+def regime_html(regime, macro_hours: float = 0.0, macro_filter: Optional[Dict] = None) -> str:
+    """메인 거시 방향 카드: 한 줄 결론 → 행동 가이드 → 방향 게이지 → 근거 설명 → (횡보) 전환 기준선 → 신뢰도.
+    v29.7: 색(큰 흐름 점수)과 글(BTC 일봉·4시간 추세 조합)이 달라 '초록불인데 횡보'처럼 헷갈려서, 제목에 둘을 나눠 쓰고
+    실제 추천에 영향을 주는 규칙(거시 필터)과 '색은 진입 신호가 아님'을 함께 보여줌."""
     info = REGIME_INFO[regime.overall]
     score = max(-1.0, min(1.0, regime.score))
     pos_pct = (score + 1) / 2 * 100
@@ -529,7 +558,8 @@ def regime_html(regime, macro_hours: float = 0.0) -> str:
 
     return (
         f'<div class="regime" style="background:{info["bg"]};border-left:5px solid {info["color"]}">'
-        f'<div class="t">{info["emoji"]} {e(regime.headline)}</div>'
+        f'<div class="t">{info["emoji"]} 큰 흐름 {BIG_FLOW[regime.overall]} · 지금 {e(regime.headline)}</div>'
+        f'<div class="act">{macro_trade_line(macro_filter)}</div>'
         f'<div class="act">▶ {e(regime.action)}</div>'
         f'<div class="gauge"><div class="gauge-track">'
         f'<span class="gauge-lbl left">하락</span><span class="gauge-lbl mid">중립</span>'
@@ -540,6 +570,9 @@ def regime_html(regime, macro_hours: float = 0.0) -> str:
         f'{breakout}{notes}'
         f'<div class="conf">판단 신뢰도 <b style="color:{conf_color}">{e(regime.confidence_label)}</b>'
         f' <span class="hint">· 근거들이 같은 방향을 가리키는 정도</span></div>'
+        f'<div class="unver">🚦 색은 큰 흐름 참고용이지 진입 신호가 아니에요. 일봉 중심이라 하루 이틀 하락으로는 잘 안 바뀌고, '
+        f'바뀌어도 봉 2개 마감까지 확인 후 바뀌어요. 5년 검증: 일봉 흐름이 강한 상승(+0.25 이상)일 때 앱의 롱 신호도 '
+        f'평균 +0.02R로 이득이 거의 없었어요 — 진입은 추천 카드만.</div>'
         f'</div>'
     )
 
@@ -589,3 +622,47 @@ def regime_detail_html(regime) -> str:
         rows.append(row("도미넌스·TOTAL", "비중 10%", f"기록 {span:.0f}시간 — 24시간 이후 반영"))
     rows.append(row("종합 점수", "−1 ~ +1", f"<b>{regime.score:+.2f}</b> (±0.25 넘으면 추세)"))
     return f'<div class="tf">{"".join(rows)}</div>'
+
+
+# ---------------------------------------------------------------- v29.6 보유 중 포지션 관리
+HOLD_EVIDENCE = ("5년 검증(Bitget 선물, 같은 매매법): **규칙대로 들고 있기가 가장 나았어요.** "
+                 "물타기는 한 거래 최대 손실을 같게 맞추면 두 기간 모두 연수익이 줄었고(2021~23 +67%→+50%, 2024~ +129%→+67%), "
+                 "손절을 내리고 물타면 더 나빴어요. 불리할 때 일찍 정리하는 것도 기간마다 엇갈려 이득이 없었어요. "
+                 "불타기(+1R 종가에 0.5% 추가)는 선택 — 두 기간 모두 수익↑, 낙폭 +4%p.")
+
+
+def held_position_card(t: dict) -> tuple:
+    """실전 추적 '보유' 기록 하나 → (제목, 할 일 줄 목록). 가격은 선물 표기(1000PEPE 등은 ×배수)."""
+    lv = t.get("live") or {}
+    m = float(t.get("mult") or 1)
+    p = lambda x: fmt_price(None if x is None else float(x) * m)
+    long_ = t.get("direction") == "long"
+    coin = t["symbol"].split("/")[0] if m == 1 else f"{int(m)}{t['symbol'].split('/')[0]}"
+    sig_kst = (pd.Timestamp(t["signal_ts"]) + pd.Timedelta(hours=4 + 9)).strftime("%m-%d %H:%M")
+    title = f"{coin} {'롱' if long_ else '숏'} · {t.get('family', '')} · 신호 {sig_kst} 마감"
+    if not lv:
+        return title, ["상태 계산 전이에요. 잠시 뒤 다시 확인돼요."]
+    rn = lv.get("R_now")
+    lines = [f"진입 {p(lv['entry'])} → 마지막 4시간봉 종가 {p(lv['last_close'])}"
+             + (f" (**{rn:+.2f}R**)" if rn is not None else "") + f" · 보유 {lv['held']}/{lv['hmax']}봉"]
+    if lv["stage"] == 0:
+        lines.append(f"🛑 손절 {p(lv['sl'])} 그대로. 목표1 {p(lv['tp1'])}에 닿으면 손절을 **진입가 {p(lv['entry'])}**로 올리기 "
+                     "(트레일링 주문을 걸어 뒀다면 자동)")
+    else:
+        lines.append(f"🛑 목표1 도달 → 손절은 본전 이상. 다음 4시간 손절선 **{p(lv['stop_next'])}** "
+                     f"({'최고가 −' if long_ else '최저가 +'} {lv['trail']:g} ATR, 봉마다 유리한 쪽으로만 옮김). 트레일링 주문이 있으면 그대로 두기")
+    pyr = lv.get("pyramid") or {}
+    if pyr.get("first_idx") is None:
+        lines.append(f"➕ 불타기(선택): 4시간봉 종가가 {p(pyr.get('level'))} {'위로' if long_ else '아래로'} 마감하면 "
+                     f"계좌 0.5% 위험만큼 한 번 추가 · 추가분 손절 = 진입가 {p(lv['entry'])}")
+    elif pyr.get("now"):
+        lines.append(f"➕ 불타기(선택): ✅ 방금 마감한 봉에서 조건 충족 — 지금 계좌 0.5% 위험만큼 추가 가능 · "
+                     f"추가분 손절 = 진입가 {p(lv['entry'])}")
+    else:
+        fk = (pd.Timestamp(pyr["first_ts"]) + pd.Timedelta(hours=4 + 9)).strftime("%m-%d %H:%M")
+        lines.append(f"➕ 불타기: 조건은 {fk} 마감 봉에서 이미 충족 — 그때 추가했으면 추가분 손절 {p(lv['entry'])} 유지, "
+                     "놓쳤으면 건너뛰기(늦게 추가하면 검증 밖)")
+    lines.append("🚫 물타기·손절 내리기: 하지 않기")
+    left = max(0, lv["hmax"] - lv["held"])
+    lines.append(f"⏱ 남은 시간 {left}봉(약 {left * 4 / 24:.1f}일) — 그때까지 안 끝나면 그 봉 종가에 정리")
+    return title, lines

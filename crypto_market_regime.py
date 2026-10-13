@@ -41,7 +41,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-12 v29.5"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-13 v29.7"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -3107,7 +3107,9 @@ def _merge_tracks(local_txt: str, remote_txt: str) -> str:
         if k is None:
             continue
         cur = merged.get(k)
-        if cur is None or _TRACK_RANK.get(t.get("status"), 0) >= _TRACK_RANK.get(cur.get("status"), 0):
+        rt, rc = _TRACK_RANK.get(t.get("status"), 0), (_TRACK_RANK.get(cur.get("status"), 0) if cur else -1)
+        # 더 진행된 상태가 이김. 같은 단계면 더 최근에 확인한 기록(v29.6 'checked')이 이김 — 없으면 예전처럼 나중 것
+        if cur is None or rt > rc or (rt == rc and str(t.get("checked", "")) >= str(cur.get("checked", ""))):
             merged[k] = t
     return json.dumps(sorted(merged.values(), key=lambda t: str(t.get("created", ""))), ensure_ascii=False)
 
@@ -3144,6 +3146,54 @@ def cloud_restore() -> str:
     except Exception as e:
         CLOUD["last_error"] = str(e)[:150]
         return "error"
+
+
+def cloud_pull(min_interval: float = 120.0) -> str:
+    """v29.6: 다른 기기(PC↔폰)가 올린 실전 추적·포트폴리오 기록을 주기적으로 당겨와 합침.
+    (예전엔 앱이 처음 켜질 때 한 번만 받아서, 폰이 PC의 '종료'를 모르고 계속 '보유'로 보여줬음)"""
+    if not CLOUD["enabled"]:
+        return "off"
+    now = time.time()
+    if now - CLOUD.get("last_pull", 0.0) < min_interval:
+        return "skip"
+    CLOUD["last_pull"] = now
+    try:
+        files = _gist_files()
+        n = 0
+        for path, fn in ((TRACK_FILE, _merge_tracks), (PORT_LOG_FILE, _merge_port_log)):
+            name = os.path.basename(path)
+            remote = files.get(name, "")
+            if not remote.strip() or CLOUD["remote_hashes"].get(name) == _sha(remote):
+                continue
+            local = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+            text = fn(local, remote) if local.strip() else remote
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            CLOUD["remote_hashes"][name] = _sha(remote)
+            CLOUD["hashes"][path] = _sha(text) if text == remote else None   # 합친 결과가 다르면 다음 저장 때 올림
+            n += 1
+        CLOUD["last_pulled"] = utc_now()
+        return f"받음 {n}개"
+    except Exception as e:
+        CLOUD["last_error"] = str(e)[:150]
+        return "error"
+
+
+def refresh_tracks(min_interval: float = 600.0, force: bool = False) -> str:
+    """v29.6: 전체 분석을 기다리지 않고 진행 중인 추적 기록만 다시 계산 (다른 기기 기록 당겨오기 → 계산 → 저장·올리기).
+    화면을 열 때마다 부르되 10분에 한 번만 실제로 계산."""
+    now = time.time()
+    if not force and now - CLOUD.get("last_track_refresh", 0.0) < min_interval:
+        return "skip"
+    CLOUD["last_track_refresh"] = now
+    cloud_pull(0 if force else 120.0)
+    tracks = load_tracks()
+    if not any(t["status"] in ACTIVE_TRACK for t in tracks):
+        return "none"
+    update_tracks(tracks, LAST_LOADED)
+    _save_tracks(tracks)
+    cloud_sync(force=True)
+    return "updated"
 
 
 def cloud_sync(force: bool = False, min_interval: float = 60.0) -> str:
@@ -3238,6 +3288,7 @@ def track_new_setups(setups: List[CoinSetup], tracks: List[Dict]) -> int:
                        "group": x.group or coin_group(x.symbol), "tier": x.vol_tier or "",
                        # v27: 이 추천에 적용한 청산 규칙 (예전 기록에는 없음 → 예전 규칙으로 계산)
                        "frac": x.exit_frac, "trail": x.exit_trail, "hold": x.max_hold,
+                       "perp": x.perp_symbol or "", "mult": int(x.perp_mult or 1),
                        "risk_mult": float(getattr(x, "risk_mult", 1.0) or 1.0)})
         active.add((x.symbol, direction))
         added += 1
@@ -3252,7 +3303,15 @@ def update_tracks(tracks: List[Dict], loaded: Dict[str, tuple]) -> None:
             continue
         try:
             got = loaded.get(t["symbol"])
-            df = got[1] if got else drop_unclosed(fetch_ohlcv(t["exchange"], t["symbol"]))
+            df = got[1] if got and got[0] == "bitget" else None
+            if df is None and ANALYZE_ON_PERP:
+                # v29.6: 추천 당시 거래소(OKX·Binance 현물)와 상관없이 Bitget 선물로 계산 → PC·폰 결과가 같음
+                # (폰 서버는 Binance가 막혀 예전 기록을 계산 못 하고 '보유'에 멈춰 있었음)
+                df = drop_unclosed(fetch_ohlcv("bitget", t["symbol"]))
+            if (df is None or df.empty) and got:
+                df = got[1]
+            if df is None or df.empty:
+                df = drop_unclosed(fetch_ohlcv(t["exchange"], t["symbol"]))
             if df is None or df.empty:
                 continue
             df = df.reset_index(drop=True)
@@ -3263,12 +3322,20 @@ def update_tracks(tracks: List[Dict], loaded: Dict[str, tuple]) -> None:
             sig = {idx: {"direction": t["direction"], "bias": t["bias"], "entry": t["entry"], "sl": t["sl"],
                          "tp1": t["tp1"], "atr": t["atr"], "is_chase": t["is_chase"], "market": t["market"],
                          "tags": t.get("tags", []), "frac": t.get("frac"), "trail": t.get("trail"), "hold": t.get("hold")}}
-            tr = simulate_exits(df.iloc[:], sig, "partial_trail", entry_mode="retest")
+            st_: Dict = {}
+            tr = simulate_exits(df.iloc[:], sig, "partial_trail", entry_mode="retest", open_state=st_)
+            t["checked"] = str(utc_now())
             if tr:
                 x = tr[0]
                 t.update(status="종료", R=round(x["R"], 3), gross_R=round(x["gross_R"], 3), reason=x["reason"],
                          exit_ts=str(df["ts"].iloc[x["exit_idx"]]))
+                t.pop("live", None)
                 continue
+            if st_:
+                if not t.get("mult") and _LAST_PERPS:      # 예전 기록: 선물 배수(1000PEPE 등) 채워서 선물 가격으로 보여주기
+                    p_, m_ = perp_match(t["symbol"], _LAST_PERPS)
+                    t["perp"], t["mult"] = p_ or "", int(m_ or 1)
+                t["live"] = _live_state(st_, df, t)
             after = df.iloc[idx + 1:idx + 16]
             long_side = t["direction"] == "long"
             if t["market"] or not t["is_chase"]:
@@ -3281,6 +3348,41 @@ def update_tracks(tracks: List[Dict], loaded: Dict[str, tuple]) -> None:
                 t["status"] = "미체결"
         except Exception as e:
             print(f"[warn] 추적 갱신 실패 {t.get('symbol')}: {e}")
+
+
+PYRAMID_TRIGGER_R = 1.0   # 불타기: 4시간봉 종가가 진입가 + 1R(손절폭만큼 유리) 처음 넘을 때 (v29 검증, 선택)
+
+
+def _live_state(st_: Dict, df: pd.DataFrame, t: Dict) -> Dict:
+    """보유 중 포지션의 지금 상태: 실제 진입가·지금 손절선(본전·추적 반영)·다음 봉 손절선·불타기 조건·남은 봉 수."""
+    long_ = st_["direction"] == "long"
+    d = 1 if long_ else -1
+    e, sl, atr = float(st_["entry"]), float(st_["sl"]), float(st_["atr"] or 0)
+    risk = abs(e - sl)
+    trail = float(st_.get("trail") or TRAIL_ATR)
+    hmax = int(st_.get("hold") or 60)
+    i0, last = int(st_["entry_idx"]), int(st_["last_idx"])
+    closes = df["close"].to_numpy(float)
+    if st_["stage"] == 0:
+        stop_now = sl
+        nxt = sl
+    else:
+        best = float(st_["best"])
+        stop_now = float(st_["stop"])
+        nxt = max(stop_now, best - trail * atr) if long_ else min(stop_now, best + trail * atr)
+    lvl = e + d * PYRAMID_TRIGGER_R * risk
+    after = closes[i0 + 1:last + 1]
+    hit = np.flatnonzero((after - lvl) * d >= 0) if len(after) else np.array([], int)
+    pyr = {"level": lvl, "first_idx": int(i0 + 1 + hit[0]) if len(hit) else None}
+    if pyr["first_idx"] is not None:
+        pyr["first_ts"] = str(df["ts"].iloc[pyr["first_idx"]])
+        pyr["now"] = pyr["first_idx"] == last          # 방금 마감한 봉에서 처음 충족 → 지금 추가 가능
+        pyr["add_stop"] = e
+    return {"entry": e, "entry_ts": str(df["ts"].iloc[i0]), "stage": int(st_["stage"]), "stop_now": stop_now,
+            "stop_next": nxt, "sl": sl, "tp1": float(st_["tp1"]), "risk": risk, "trail": trail, "atr": atr,
+            "held": last - i0, "hmax": hmax, "last_close": float(closes[last]),
+            "last_ts": str(df["ts"].iloc[last]), "R_now": d * (float(closes[last]) - e) / risk if risk else None,
+            "pyramid": pyr}
 
 
 def tracking_summary(tracks: List[Dict], ref: Optional[Dict] = None) -> tuple:
@@ -3449,7 +3551,8 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         x.counter_trend = x.coin_regime in ("uptrend", "downtrend") and x.coin_regime != regime.overall
     health: Dict[str, Dict] = {}
     tracks: List[Dict] = []
-    try:  # 실전 추적: 진행 중인 기록 결과 갱신 → 자동 방어 상태 계산
+    try:  # 실전 추적: 다른 기기 기록 당겨와 합치기 → 진행 중인 기록 결과 갱신 → 자동 방어 상태 계산
+        cloud_pull(0)
         tracks = load_tracks()
         update_tracks(tracks, LAST_LOADED)
         health = family_health(tracks, load_lab_reference())
@@ -3749,7 +3852,8 @@ def donchian_variant_signals(dsig: Dict[int, Dict], variant: str) -> Dict[int, D
 
 def simulate_exits(df: pd.DataFrame, signals: Dict[int, Dict], exit_mode: str = "partial_trail",
                    pending_expiry_bars: int = 15, max_hold_bars: int = 60,
-                   entry_mode: str = "retest", slip_pct: Optional[float] = None) -> List[Dict]:
+                   entry_mode: str = "retest", slip_pct: Optional[float] = None,
+                   open_state: Optional[Dict] = None) -> List[Dict]:
     """신호를 봉 단위로 재생하며 체결·청산을 시뮬레이션. 거래별 상세(순 R, 비용 전 R, 표시 등)를 반환.
     - entry_mode="retest": 추격 신호는 지정가 대기 → 이후 봉에서 닿아야 체결(체결 전 손절선 넘으면 취소)
     - entry_mode="immediate": 추격 신호도 신호 봉 종가에 바로 시장가 진입
@@ -3854,6 +3958,10 @@ def simulate_exits(df: pd.DataFrame, signals: Dict[int, Dict], exit_mode: str = 
             pending = {**sig, "expiry_idx": i + pending_expiry_bars}
         else:
             t = _open(sig, i, sig["entry"], "지정가")
+    if open_state is not None and t:   # v29.6: 아직 보유 중인 포지션의 지금 상태(보유 중 관리 카드용)
+        open_state.update({k: t.get(k) for k in ("entry", "entry_idx", "stage", "stop", "best", "sl", "tp1", "atr",
+                                                 "direction", "trail", "hold")})
+        open_state["last_idx"] = len(df) - 1
     return trades
 
 
