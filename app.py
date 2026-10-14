@@ -33,7 +33,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="▲▲▲", page_icon="▲▲▲", layout="centered",
+st.set_page_config(page_title="코인 추천", page_icon="📈", layout="centered",
                    initial_sidebar_state="collapsed")
 st.markdown(f"<style>{L.CSS}</style>", unsafe_allow_html=True)
 
@@ -61,8 +61,8 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-13 v30"
-st.title("▲▲▲ ▲▲▲")
+APP_VERSION = "2026-10-15 v30.3"
+st.title("📈 코인 추천")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
 if _engine_ver != APP_VERSION:
@@ -179,7 +179,7 @@ with st.expander("⚙️ 설정"):
                           key="fams",
                           help="v29(5년·2021.10~2026.10, 2021-23 ↔ 2024-26 두 사이클 교차 검증)에서 살아남은 3가지가 기본이에요. "
                                "박스 돌파: 15일(90봉) 박스·거래량 2배. 돌파 후 되돌림: 품질 박스 돌파 뒤 경계 재확인. "
-                               "추세 눌림목: 상승 추세 속 눌림 롱·하락 추세 속 반등 숏(새로 추가, 실전 30건 전까지 위험 절반). "
+                               "추세 눌림목: 상승 추세 속 눌림 롱·하락 추세 속 반등 숏(위험 ½ 고정 — 5년 검증에서 계좌 효율이 더 좋았음). "
                                "위치 다이버전스는 2021-23 사이클에서 마이너스라 기본에서 뺐어요. "
                                "신고점 돌파·추세·박스 역매매는 근거가 약해요.", **_fam_default)
     if store["lab_cfg"]:
@@ -422,16 +422,68 @@ def render_export_perp() -> None:
         st.caption("받은 zip 파일을 그대로 Claude 대화창에 올려주세요. 압축을 풀 필요 없어요.")
 
 
+def render_export_taker() -> None:
+    """v30.1: Binance 시장가 매수 거래량(CVD) 내보내기 — 매집 검증용."""
+    x1, x2 = st.columns(2)
+    t_n = x1.slider("코인 수 (거래량 순위)", 30, 100, 100, step=10, key="tk_n")
+    t_days = x2.selectbox("기간", [730, 1095, 1825], index=2, key="tk_days",
+                          format_func=lambda d: f"{d // 365}년" + (" (2022 하락장 포함)" if d >= 1825 else ""))
+    m1, m2 = st.columns(2)
+    t_spot = m1.checkbox("현물", value=True, key="tk_spot", help="진짜 매수세(현물로 산 양)를 보는 핵심 자료")
+    t_perp = m2.checkbox("선물", value=True, key="tk_perp", help="레버리지 매수·매도 — 현물과 비교해 '현물이 끄는 상승'인지 보려면 필요")
+    mk = [m for m, on in (("spot", t_spot), ("perp", t_perp)) if on]
+    _y = t_days / 365
+    st.caption(f"담기는 것: 상위 {t_n}개 + BTC의 Binance 4시간봉 + 시장가로 산 수량·체결 건수 (시장마다 zip 1개). "
+               f"예상 소요 약 {round(t_n * _y * 0.012 * len(mk) + 2)}분 · 파일당 약 {max(2, round(t_n * _y * 0.04))}MB "
+               f"(25MB가 넘으면 기간이나 코인 수를 줄여 주세요)")
+    st.caption("⏳ PC에서만 받을 수 있어요(폰 서버는 미국이라 Binance가 막혀 있어요). Binance에 없는 코인은 빠져요. "
+               "도중에 끊겨도 같은 설정으로 다시 누르면 12시간 안에 받은 코인은 건너뛰어요.")
+    if st.button("▶ 시장가 매수 거래량 받기", use_container_width=True, disabled=not mk):
+        prog = st.progress(0.0, text="Binance 데이터 받는 중...")
+
+        def cb(i: int, n: int, sym: str) -> None:
+            prog.progress(min(i / max(n, 1), 1.0), text=f"{sym} ({i}/{n})")
+
+        with store["lock"]:
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    store["export_taker"] = cmr.export_taker_data(t_n, t_days, tuple(mk), cb)
+                now_ = pd.Timestamp.now(tz="UTC").tz_localize(None) + pd.Timedelta(hours=9)
+                store["export_taker_stamp"] = f"{t_n}coins_{t_days}d_{now_:%Y%m%d_%H%M}"
+                store["export_taker_error"] = None
+            except cmr.BinanceBlocked as e:
+                store["export_taker_error"] = str(e)
+            except Exception:
+                store["export_taker_error"] = traceback.format_exc() + "\n" + buf.getvalue()
+        prog.empty()
+    if store.get("export_taker_error"):
+        st.error("시장가 매수 거래량 받기 중 오류가 발생했어요. 아래 내용을 그대로 복사해서 알려주세요.")
+        st.code(store["export_taker_error"], language=None)
+    for m, data in (store.get("export_taker") or {}).items():
+        nm = "현물" if m == "spot" else "선물"
+        st.download_button(f"⬇ {nm} 다운로드 ({len(data) / 1e6:.1f}MB)", data=data, key=f"dl_taker_{m}",
+                           file_name=f"taker_{m}_{store.get('export_taker_stamp', '')}.zip",
+                           mime="application/zip", use_container_width=True)
+    if store.get("export_taker"):
+        st.caption("받은 zip 파일을 그대로 Claude 대화창에 올려주세요(현물·선물 둘 다). 압축을 풀 필요 없어요.")
+
+
 def render_export() -> None:
     st.markdown("#### 📦 연구용 데이터 내보내기")
     st.caption("거래소 API로 과거 데이터를 받아 파일 하나(zip)로 저장해요. 이 파일을 Claude와의 대화에 올리면 "
                "Claude가 직접 수십 가지 변형을 돌려 정밀 검증할 수 있어요.")
-    ex_mode = st.radio("내보낼 데이터", ["4시간봉·일봉 (기본, 최대 5년)", "1시간봉 전용 (최대 2년)", "Bitget 선물 캔들 (현물 비교용)"],
+    ex_mode = st.radio("내보낼 데이터", ["4시간봉·일봉 (기본, 최대 5년)", "1시간봉 전용 (최대 2년)", "Bitget 선물 캔들 (현물 비교용)",
+                                     "시장가 매수 거래량 (Binance · 매집 검증용)"],
                        horizontal=True, key="ex_mode",
                        help="1시간봉 전용: 1시간봉 매매법을 찾는 연구용. 1시간봉과 일봉(거시 흐름 계산용)만 담아요\n\n"
-                            "Bitget 선물 캔들: v29.4부터 앱은 선물 차트로 분석해요. 선물 차트로 매매법을 다시 검증할 때 쓰는 자료예요")
+                            "Bitget 선물 캔들: v29.4부터 앱은 선물 차트로 분석해요. 선물 차트로 매매법을 다시 검증할 때 쓰는 자료예요\n\n"
+                            "시장가 매수 거래량: 시장가로 산 양과 판 양을 따로 담아요. 캔들 거래량으로는 알 수 없는 '누가 사고 있나(매집)'를 검증하는 자료예요")
     if ex_mode.startswith("Bitget 선물"):
         render_export_perp()
+        return
+    if ex_mode.startswith("시장가 매수"):
+        render_export_taker()
         return
     only_1h = ex_mode.startswith("1시간봉")
     x1, x2 = st.columns(2)
@@ -624,10 +676,12 @@ def render(items: list, slots: int = 10 ** 6) -> None:
         if ev:
             mult *= cmr.EVENT_RISK_MULT
         rc = dataclasses.replace(risk_cfg, risk_per_trade_pct=risk_pct * mult)
-        sizing = cmr.apply_liquidity_cap(cmr.calculate_position_size(s.entry_price, s.sl, rc), getattr(s, "vol24h", None))
+        # v30.2: 시장가 신호는 지금 가격 기준으로 수량 계산(신호 뒤 가격이 움직였으면 손절까지 거리가 달라짐)
+        px_ = L.market_price(s)
+        sizing = cmr.apply_liquidity_cap(cmr.calculate_position_size(px_, s.sl, rc), getattr(s, "vol24h", None))
         st.markdown(L.card_html(s, sizing, risk_pct * mult, over_limit=k >= slots), unsafe_allow_html=True)
         with st.expander("📋 주문 메모 (복사)"):
-            st.code(L.order_memo(s, sizing, L.leverage_guide(s.entry_price, s.sl)), language=None)
+            st.code(L.order_memo(s, sizing, L.leverage_guide(px_, s.sl)), language=None)
 
 
 def recommendations() -> None:
@@ -670,8 +724,10 @@ def recommendations() -> None:
             st.warning(f"🛡 자동 방어: '{fam_}' 신호 — {h_['reason']}.")
     dead = [s for s in setups if s.live_status in ("invalid", "missed")]
     alive = [s for s in setups if s.live_status not in ("invalid", "missed")]
-    ready = sorted([s for s in alive if s.live_status != "chase"], key=L.sort_key, reverse=True)
-    waiting = sorted([s for s in alive if s.live_status == "chase"], key=L.sort_key, reverse=True)
+    # v30.2: 시장가 신호는 가격이 멀어져도 '대기(지정가)' 탭으로 보내지 않음 — 지정가 대기는 검증에서 더 나빴음
+    _wait = lambda s: s.live_status == "chase" and L.entry_label(s) != "진입(시장가)"
+    ready = sorted([s for s in alive if not _wait(s)], key=L.sort_key, reverse=True)
+    waiting = sorted([s for s in alive if _wait(s)], key=L.sort_key, reverse=True)
     slots = cmr.available_slots(risk_cfg)
 
     if store.get("live_at") is not None:
@@ -862,8 +918,10 @@ def render_today() -> None:
     active_all = [s for s in r["all_setups"] if getattr(s, "health", "") != "paused"]
     with contextlib.redirect_stdout(io.StringIO()):
         setups = cmr.cap_correlated_exposure(active_all, risk_cfg) if active_all else []
-    ready = sorted([s for s in setups if s.live_status == "ready"], key=L.sort_key, reverse=True)
-    waiting = [s for s in setups if s.live_status == "chase"]
+    _mk = lambda s: L.entry_label(s) == "진입(시장가)"
+    ready = sorted([s for s in setups if s.live_status == "ready" or (s.live_status == "chase" and _mk(s))],
+                   key=L.sort_key, reverse=True)
+    waiting = [s for s in setups if s.live_status == "chase" and not _mk(s)]
     slots = cmr.available_slots(risk_cfg)
     todo = ready[:slots] if slots > 0 else []
     pf = get_portfolio()
@@ -872,7 +930,7 @@ def render_today() -> None:
     ev_now = cmr.active_event()
     for s in todo:
         mult = (getattr(s, "risk_mult", 1.0) or 1.0) * (cmr.EVENT_RISK_MULT if ev_now else 1.0)
-        sz = cmr.apply_liquidity_cap(cmr.calculate_position_size(s.entry_price, s.sl, dataclasses.replace(
+        sz = cmr.apply_liquidity_cap(cmr.calculate_position_size(L.market_price(s), s.sl, dataclasses.replace(
             risk_cfg, risk_per_trade_pct=risk_pct * mult)), getattr(s, "vol24h", None))
         sig_notional += sz["notional"]
         sig_risk += sz["risk_amount"]
@@ -974,17 +1032,65 @@ if _tracks:
             st.dataframe(pd.DataFrame(rows_), hide_index=True, use_container_width=True)
         for n_ in notes_:
             st.markdown(f"- {n_}")
-        recent = [{"코인": t["symbol"], "유형": t["family"], "방향": "롱" if t["direction"] == "long" else "숏",
-                   "신호(한국시간)": (pd.Timestamp(t["signal_ts"]) + pd.Timedelta(hours=9)).strftime("%m-%d %H:%M"),
+        # v30.2: 진행 중(대기·보유)은 전부 + 끝난 기록은 최근 30건. 코인 이름으로 찾기 (예전엔 최근 12건만 보여서
+        # 그 뒤 추천이 많이 나오면 이미 끝난 기록이 목록에서 밀려 '사라진' 것처럼 보였음)
+        q_t = st.text_input("🔍 코인으로 찾기 (예: AVAX) — 비우면 진행 중 전부 + 끝난 최근 30건", key="track_find").strip().upper()
+        q_t = q_t.replace("/USDT", "").replace(":USDT", "")
+        if q_t:
+            show_ = [t for t in _tracks if t["symbol"].split("/")[0] == q_t or q_t in str(t.get("perp", ""))]
+        else:
+            act_ = [t for t in _tracks if t["status"] in cmr.ACTIVE_TRACK]
+            show_ = act_ + [t for t in _tracks if t["status"] not in cmr.ACTIVE_TRACK][-30:]
+        show_ = sorted(show_, key=lambda t: str(t["signal_ts"]), reverse=True)
+        bar_ = pd.Timedelta(cmr.TIMEFRAME)
+        recent = [{"코인": t["symbol"].split("/")[0], "유형": t["family"], "방향": "롱" if t["direction"] == "long" else "숏",
+                   "신호 봉 마감(한국)": (pd.Timestamp(t["signal_ts"]) + bar_ + pd.Timedelta(hours=9)).strftime("%m-%d %H:%M"),
                    "상태": t["status"], "R": t.get("R") if t["status"] == "종료" else (
                        round(t["live"]["R_now"], 2) if t.get("live") and t["live"].get("R_now") is not None else None),
-                   "청산": t.get("reason", ""),
+                   "청산": t.get("reason", "") + (" · 직접 추가" if t.get("recovered") else ""),
                    "확인": (pd.Timestamp(t["checked"]) + pd.Timedelta(hours=9)).strftime("%m-%d %H:%M") if t.get("checked") else ""}
-                  for t in reversed(_tracks[-12:])]
-        st.dataframe(pd.DataFrame(recent), hide_index=True, use_container_width=True)
+                  for t in show_]
+        if recent:
+            st.dataframe(pd.DataFrame(recent), hide_index=True, use_container_width=True)
+        elif q_t:
+            st.warning(f"{q_t}: 추적 기록이 없어요. 아래 '추적에 안 보이는 추천 다시 찾기'로 넣을 수 있어요.")
         st.caption("ⓘ 보유 중인 R은 마지막 4시간봉 종가 기준(아직 안 끝난 값). 'R'·'청산'은 Bitget 선물 완성봉으로 계산하고, "
                    "PC·폰 기록은 클라우드(Gist)로 합쳐요 — 더 진행된 상태(종료 > 보유 > 대기)가 남아요. "
-                   "실제 체결 가격·시점과는 조금 다를 수 있어요.")
+                   "실제 체결 가격·시점과는 조금 다를 수 있어요. '확인 불가' = 오래도록 차트를 받을 수 없어 끝낸 기록.")
+
+# v30.2: 추천받아 들어갔는데 추적에 안 보일 때 — 최근 3일 신호를 지금 규칙으로 다시 찾아 넣기
+with st.expander("🔧 추적에 안 보이는 추천 다시 찾기"):
+    st.caption("들어간 코인 이름을 넣으면, 최근 3일(4시간봉 18개) 안에 켜둔 매매법 규칙으로 나왔던 신호를 Bitget 선물 차트로 다시 찾아요. "
+               "그때의 거시 필터·동시 추천 개수 제한은 다시 확인하지 않으니, 실제로 받은 추천과 같은 줄(시각·방향)을 골라 넣으세요.")
+    rq_ = st.text_input("코인 (예: AVAX)", key="recover_q").strip().upper().replace("/USDT", "").replace(":USDT", "")
+    ss_ = st.session_state
+    if ss_.get("recover_msg"):
+        st.success(ss_.pop("recover_msg"))
+    if rq_ and st.button("🔎 최근 신호 찾기", key="recover_go"):
+        with store["lock"]:
+            buf_ = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf_):
+                    ss_["recover_hits"] = cmr.find_recent_signals(rq_)
+                ss_["recover_q_done"] = rq_
+            except Exception:
+                ss_["recover_hits"], ss_["recover_q_done"] = [], rq_
+                st.code(traceback.format_exc(), language=None)
+    if ss_.get("recover_q_done") == rq_ and rq_:
+        hits_ = ss_.get("recover_hits") or []
+        if not hits_:
+            st.info(f"{rq_}: 최근 3일 안에 켜둔 매매법 규칙의 신호가 없어요. 코인 이름이나 켜둔 신호 유형을 확인해 주세요.")
+        for k_, h_ in enumerate(hits_):
+            m_ = h_.get("mult") or 1
+            c1_, c2_ = st.columns([4, 1])
+            c1_.markdown(f"**{h_['symbol'].split('/')[0]}** · {h_['family']} · {'롱' if h_['direction'] == 'long' else '숏'} · "
+                         f"신호 봉 마감 {h_['close_kst']} · 진입 {L.fmt_price(h_['entry'] * m_)} · 손절 {L.fmt_price(h_['sl'] * m_)} · "
+                         f"목표1 {L.fmt_price(h_['tp1'] * m_)}")
+            if c2_.button("추적에 넣기", key=f"recover_add_{k_}"):
+                with store["lock"]:
+                    msg_ = cmr.add_recovered_track(h_)
+                ss_["recover_msg"] = f"{h_['symbol'].split('/')[0]} {h_['close_kst']}: {msg_}"
+                st.rerun()
 
 # ---------------------------------------------------------------- 부가 기능
 with st.expander("📖 용어 / 사용법"):
@@ -996,7 +1102,7 @@ with st.expander("📖 용어 / 사용법"):
         "진입 직후 손절 주문과 트레일링 주문(활성화 가격 = 목표1)을 함께 걸어두면 돼요.\n"
         "- **➕ 추가 진입(선택)**: 4시간봉 종가가 진입가 + 1R(손절폭만큼 유리)을 넘으면 계좌 0.5% 위험만큼 한 번 더. 추가분 손절 = 처음 진입가, "
         "정리는 본 포지션과 같이. 5년 검증 두 사이클 모두 수익↑·낙폭 +4%p.\n"
-        "- **🔁 돌파 후 되돌림 / 📈 추세 눌림목**: 실전 추적 30건 평균이 플러스가 될 때까지 위험 절반.\n"
+        "- **🔁 돌파 후 되돌림**: 실전 추적 30건 평균이 플러스가 될 때까지 위험 절반. **📈 추세 눌림목**: 위험 ½ 고정(실전 30건 뒤에도 그대로).\n"
         "- **🧭 시장 국면**: BTC 일봉이 200일 평균 위·아래인지와 60일 수익률(±20%)로 나눈 4가지. 5년 검증에서 국면마다 설정을 "
         "바꾸는 건 효과가 없어 표시만 해요(국면별 과거 성과 참고용).\n"
         "- **손익비**: (목표1까지 거리) ÷ (손절까지 거리).\n"

@@ -177,6 +177,17 @@ def tp1_label(setup) -> str:
     return "목표1(추적 시작)" if exit_of(setup)[0] <= 0 else "목표1"
 
 
+def market_price(setup) -> float:
+    """v30.2: 수량·레버리지 계산 기준 가격. 시장가 신호는 지금 가격(진입가 표시는 신호 때 가격이라, 그사이 가격이
+    움직였으면 손절까지 거리가 달라져 실제 손실이 계획한 리스크보다 커질 수 있었음), 지정가 신호는 진입가."""
+    cp = getattr(setup, "current_price", None)
+    if entry_label(setup) == "진입(시장가)" and cp:
+        lg = side_info(setup.bias)[0] == "long"
+        if (lg and cp > setup.sl) or (not lg and cp < setup.sl):
+            return float(cp)
+    return float(setup.entry_price)
+
+
 def entry_label(setup) -> str:
     """신고점 돌파·즉시 진입은 시장가, 나머지는 지정가."""
     market = setup.bias.startswith(("donchian", "st_", "retest_", "div_", "pb_")) or "즉시 진입" in (setup.entry_note or "")
@@ -198,7 +209,7 @@ def exec_rules(setup) -> list:
     hold_days = int(round(hold_bars * bar / pd.Timedelta("1D")))
     out = []
     sig = getattr(setup, "signal_ts", "") or ""
-    if getattr(setup, "live_status", "") == "chase" and sig:
+    if getattr(setup, "live_status", "") == "chase" and sig and entry_label(setup) != "진입(시장가)":
         cancel = pd.Timestamp(sig) + bar * 16 + pd.Timedelta(hours=9)  # 신호 봉 마감 + 15봉
         out.append(f"지정가 유효: {cancel:%m-%d %H}시까지 — 그때까지 안 닿으면 주문 취소")
         out.append(f"보유 기한: 체결 후 최대 {hold_days}일 — 그때까지 목표1·손절 모두 안 닿으면 정리")
@@ -428,7 +439,8 @@ def _hold_text(bars: int) -> str:
 
 def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) -> str:
     side, side_kr, sub = side_info(setup.bias)
-    lev = leverage_guide(setup.entry_price, setup.sl)
+    mkt = entry_label(setup) == "진입(시장가)"
+    lev = leverage_guide(market_price(setup), setup.sl)
     e = html.escape
     tags = ""
     if setup.poc_confluence:
@@ -457,7 +469,14 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
     if getattr(setup, "rs_alt", None) is not None:
         stats += f" · 알트 대비 {setup.rs_alt:+.1f}%"
     warn = ""
-    if status == "chase" and setup.entry_price:
+    if status == "chase" and setup.entry_price and mkt:
+        # v30.2: 시장가 신호(박스 돌파·되돌림·눌림목)는 '지정가 대기'가 검증에서 더 나빴음 → 지정가 안내 대신 시간 기준 안내
+        s_icon, s_label = "⏳", "신호 때 가격에서 멀어짐 · 시장가 신호"
+        gap = (setup.current_price - setup.entry_price) / setup.entry_price * 100
+        warn = (f'<div class="warn">⏳ 현재가가 신호 때 가격보다 {abs(gap):.1f}% {"위" if gap > 0 else "아래"} — '
+                f'시장가 신호라 지정가로 되돌림을 기다리지 마세요(5년 검증: 되돌아올 때만 체결되면 크게 가는 신호를 놓쳐 더 나빴어요). '
+                f'신호 봉 마감 2시간 안이면 지금 가격으로 진입하고, 지났으면 건너뛰세요. 수량은 지금 가격 기준으로 계산했어요</div>')
+    elif status == "chase" and setup.entry_price:
         gap = (setup.current_price - setup.entry_price) / setup.entry_price * 100
         warn = (f'<div class="warn">⏳ 현재가가 진입가보다 {abs(gap):.1f}% '
                 f'{"위" if gap > 0 else "아래"} — 지정가만 걸어두고 기다리세요 (지금 시장가 진입은 추격)</div>')
@@ -494,6 +513,9 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
     if getattr(setup, "event_note", ""):
         warn += (f'<div class="over">📅 {e(setup.event_note)} — 크게 흔들리는 시간대라 권장 리스크를 절반으로 계산했어요. '
                  f'검증에서 이 시간대 진입은 평균 −0.25R이었으니 가능하면 건너뛰세요</div>')
+    if getattr(setup, "fixed_risk", None):
+        warn += (f'<div class="over">📉 추세 눌림목은 위험 {setup.fixed_risk:g}배로 고정이에요 — 거래당 수익이 박스 돌파·되돌림보다 작아, '
+                 '5년 검증에서 비중을 낮춘 쪽이 계좌 효율(연수익÷낙폭)이 더 좋았어요. 수량은 이미 낮춰서 계산했어요</div>')
     if getattr(setup, "half_start", False):
         warn += ('<div class="over">🌱 새 매매법 — 실전 기록이 쌓이기 전이라 리스크를 절반으로 낮춰 수량을 계산했어요 '
                  '(실전 추적 30건 평균이 플러스면 자동으로 정상 리스크)</div>')
@@ -503,6 +525,9 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
     if getattr(setup, "health", "") == "caution":
         warn += ('<div class="over">🛡 자동 방어: 이 신호 유형의 최근 실전 성과가 기준 아래라 '
                  '권장 리스크를 절반으로 낮춰 수량을 계산했어요</div>')
+    if getattr(setup, "already_tracked", ""):
+        warn += (f'<div class="over">📌 같은 코인·같은 방향 추천({e(setup.already_tracked)})이 아직 진행 중이에요 — '
+                 '검증 규칙은 코인당 한 포지션이라 이 추천은 실전 추적에 따로 남지 않아요. 앞 포지션을 들고 있으면 추가 진입하지 마세요</div>')
     return (f'<div class="cc {side}">'
             f'<div class="cc-head"><span class="pill {side}">{side.upper()} {e(side_kr)}</span>'
             f'<span class="sym">{e(setup.symbol)}</span>{tags}</div>'

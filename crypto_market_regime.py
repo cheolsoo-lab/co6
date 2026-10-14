@@ -23,6 +23,7 @@ import time
 import json
 import re
 import os
+import threading
 import math
 import statistics
 from dataclasses import dataclass, field
@@ -41,7 +42,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-13 v30"               # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-15 v30.3"            # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -74,7 +75,11 @@ EXIT_RULES = {
     "위치 다이버전스": {"stop_atr": 0.0, "tp_R": 3.0, "frac": 0.0, "trail": 0.75, "hold": 60},   # v29 기본 꺼짐(5년 교차 검증 탈락)
 }
 # 새로 넣은 매매법은 위험 절반으로 시작 → 실전 추적 30건 평균이 플러스(기준선 안)면 자동으로 정상 위험
-NEW_FAMILY_RISK = {"돌파 후 되돌림": 0.5, "추세 눌림목": 0.5, "위치 다이버전스": 0.5}
+NEW_FAMILY_RISK = {"돌파 후 되돌림": 0.5, "위치 다이버전스": 0.5}
+# v30.3: 승격 없이 고정하는 위험 비중. 추세 눌림목은 거래당 수익(+0.21~0.34R)이 박스 돌파·되돌림(+0.57~1.36R)보다 작아,
+# 5년·3자료(Bitget 선물·현물·Binance 선물)×2사이클 계좌 모의에서 ½로 두는 쪽이 전 신호 6칸 모두 연수익÷낙폭이 높았음
+# (균등 1·1·1 대비, 2026-10-14 검증) → 실전 30건 뒤에도 1로 올리지 않음
+FIXED_FAMILY_RISK = {"추세 눌림목": 0.5}
 LONG_BIASES = ("long", "wait_breakout_long", "range_fade_long", "donchian_long", "st_long", "retest_long", "div_long", "pb_long")
 # v29 박스 돌파 진입: 직전 90봉(15일) 박스 · 거래량 20봉 평균의 2배 이상 · 경계 밖 1 ATR 이내 마감(멀리 튄 봉은 추격 안 함)
 BOX_LOOKBACK = 90
@@ -1252,6 +1257,8 @@ class CoinSetup:
     exit_trail: Optional[float] = None  # v27: 추적 손절 폭(ATR 배수)
     max_hold: Optional[int] = None      # v27: 최대 보유 봉 수
     half_start: bool = False            # v27: 새 매매법 — 위험 절반으로 시작
+    fixed_risk: Optional[float] = None  # v30.3: 승격 없이 고정한 위험 비중(추세 눌림목 0.5)
+    already_tracked: str = ""           # v30.2: 같은 코인·방향 추적 기록이 진행 중이면 그 설명
 
 
 _VOL_DIAG: Dict[str, Dict] = {}   # v29.2: 거래소별 현물 목록 상태(진단 표시용)
@@ -1401,8 +1408,9 @@ def circuit_breaker_triggered(risk_cfg: RiskConfig, max_daily_loss_pct: float = 
     if log.empty:
         return None
 
-    log["dt"] = pd.to_datetime(log["ts"], unit="s")
-    now = pd.Timestamp.now()
+    # v30.2: 한국 날짜 기준으로 통일 (예전엔 기록은 UTC, '오늘'은 서버 시계라 PC에선 09시 전 손실이 전날로 잡혔음)
+    log["dt"] = pd.to_datetime(log["ts"], unit="s") + pd.Timedelta(hours=9)
+    now = utc_now() + pd.Timedelta(hours=9)
 
     today_pnl = log[log["dt"].dt.date == now.date()]["pnl_usdt"].sum()
     week_pnl = log[log["dt"] >= now - pd.Timedelta(days=7)]["pnl_usdt"].sum()
@@ -3037,7 +3045,9 @@ ACTIVE_TRACK = ("대기", "보유")
 # ==========================================================================
 CLOUD = {"token": None, "gist": None, "enabled": False, "last_sync": None, "last_error": None, "config_error": None,
          "hashes": {}, "remote_hashes": {}, "last_try": 0.0, "restored": None}
-_TRACK_RANK = {"대기": 0, "chase": 0, "보유": 1, "종료": 2, "미체결": 2}
+_TRACK_RANK = {"대기": 0, "chase": 0, "보유": 1, "종료": 2, "미체결": 2, "확인 불가": 2}
+# v30.2: 기록 파일 읽기·합치기·쓰기를 한 번에 하나씩 (여러 화면·기기 동기화가 동시에 돌 때 기록이 덮어써져 사라지던 문제)
+_FILE_LOCK = threading.RLock()
 
 
 def cloud_files() -> List[str]:
@@ -3119,9 +3129,12 @@ def cloud_restore() -> str:
     """시작할 때 Gist의 기록을 내려받음. 실전 추적은 합치고, 나머지는 이 컴퓨터에 파일이 없을 때만 받음."""
     if not CLOUD["enabled"]:
         return "off"
+    locked = False
     try:
         files = _gist_files()
         n = 0
+        _FILE_LOCK.acquire()
+        locked = True
         for path in cloud_files():
             name = os.path.basename(path)
             remote = files.get(name, "")
@@ -3147,6 +3160,9 @@ def cloud_restore() -> str:
     except Exception as e:
         CLOUD["last_error"] = str(e)[:150]
         return "error"
+    finally:
+        if locked:
+            _FILE_LOCK.release()
 
 
 def cloud_pull(min_interval: float = 120.0) -> str:
@@ -3166,10 +3182,11 @@ def cloud_pull(min_interval: float = 120.0) -> str:
             remote = files.get(name, "")
             if not remote.strip() or CLOUD["remote_hashes"].get(name) == _sha(remote):
                 continue
-            local = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
-            text = fn(local, remote) if local.strip() else remote
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
+            with _FILE_LOCK:
+                local = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+                text = fn(local, remote) if local.strip() else remote
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
             CLOUD["remote_hashes"][name] = _sha(remote)
             CLOUD["hashes"][path] = _sha(text) if text == remote else None   # 합친 결과가 다르면 다음 저장 때 올림
             n += 1
@@ -3222,10 +3239,14 @@ def cloud_sync(force: bool = False, min_interval: float = 60.0) -> str:
                     continue
                 tname = os.path.basename(path)
                 remote = gfiles.get(tname, "")
-                if remote.strip() and CLOUD["remote_hashes"].get(tname) != _sha(remote):
-                    merged = fn(changed[path], remote)
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(merged)
+                if remote.strip():
+                    # v30.2: Gist가 '마지막으로 본 것과 같아 보여도' 항상 합침 — 이 컴퓨터 파일이 그사이 오래된 목록으로
+                    # 덮어써졌으면, 합치지 않고 올릴 때 다른 기기 기록이 Gist에서 지워졌음 (합치기는 몇 번 해도 결과가 같음)
+                    with _FILE_LOCK:
+                        cur = open(path, encoding="utf-8").read() if os.path.exists(path) else changed[path]
+                        merged = fn(cur, remote)
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(merged)
                     changed[path] = merged
         _gist_req("PATCH", {"files": {os.path.basename(p): {"content": t} for p, t in changed.items()}})
         for p, t in changed.items():
@@ -3262,9 +3283,16 @@ def load_tracks() -> List[Dict]:
 
 
 def _save_tracks(tracks: List[Dict]) -> None:
+    """v30.2: 파일에 있는 기록과 합쳐서 저장 — 분석이 도는 사이 다른 화면·기기가 더한 기록을 지우지 않게.
+    같은 신호는 더 진행된 상태(종료 > 보유 > 대기)·더 최근에 확인한 쪽이 남음. 기록을 지우는 기능은 없음."""
     try:
-        with open(TRACK_FILE, "w", encoding="utf-8") as f:
-            json.dump(tracks[-600:], f, ensure_ascii=False)
+        with _FILE_LOCK:
+            mine = json.dumps(tracks, ensure_ascii=False, default=str)
+            cur = open(TRACK_FILE, encoding="utf-8").read() if os.path.exists(TRACK_FILE) else ""
+            text = _merge_tracks(mine, cur) if cur.strip() else mine
+            merged = json.loads(text)
+            with open(TRACK_FILE, "w", encoding="utf-8") as f:
+                json.dump(merged[-600:], f, ensure_ascii=False, default=str)
     except Exception as e:
         print(f"[warn] 추적 기록 저장 실패: {e}")
 
@@ -3312,12 +3340,20 @@ def update_tracks(tracks: List[Dict], loaded: Dict[str, tuple]) -> None:
             if (df is None or df.empty) and got:
                 df = got[1]
             if df is None or df.empty:
-                df = drop_unclosed(fetch_ohlcv(t["exchange"], t["symbol"]))
+                df = drop_unclosed(fetch_ohlcv(t.get("exchange") or "bitget", t["symbol"]))
+            # v30.2: 오래도록 계산할 수 없는 기록(상장 폐지·이름 변경·차트 범위 밖)은 '확인 불가'로 끝냄.
+            # 예전엔 '대기/보유'에 영원히 남아, 같은 코인·같은 방향의 새 추천이 추적에 안 들어갔음
+            age_bars = (utc_now() - pd.Timestamp(t["signal_ts"])) / pd.Timedelta(TIMEFRAME)
+            give_up = age_bars > int(t.get("hold") or 60) + 30
             if df is None or df.empty:
+                if give_up:
+                    t.update(status="확인 불가", reason="차트를 받을 수 없음(상장 폐지·거래 중지 등)", checked=str(utc_now()))
                 continue
             df = df.reset_index(drop=True)
             hit = df.index[df["ts"] == pd.Timestamp(t["signal_ts"])]
             if len(hit) == 0:
+                if give_up:
+                    t.update(status="확인 불가", reason="신호 봉을 차트에서 찾을 수 없음", checked=str(utc_now()))
                 continue
             idx = int(hit[0])
             sig = {idx: {"direction": t["direction"], "bias": t["bias"], "entry": t["entry"], "sl": t["sl"],
@@ -3339,7 +3375,10 @@ def update_tracks(tracks: List[Dict], loaded: Dict[str, tuple]) -> None:
                 t["live"] = _live_state(st_, df, t)
             after = df.iloc[idx + 1:idx + 16]
             long_side = t["direction"] == "long"
-            if t["market"] or not t["is_chase"]:
+            if (t["market"] or not t["is_chase"]) and not st_:
+                # v30.2: 진입 시점 가격이 이미 손절선 너머·목표 너머라 규칙상 진입하지 않은 경우(예전엔 '보유'로 멈춰 있었음)
+                t.update(status="미체결", reason="진입 조건 불충족(신호 봉 종가가 손절·목표 밖)")
+            elif t["market"] or not t["is_chase"]:
                 t["status"] = "보유"
             elif len(after) and ((after["low"] <= t["entry"]).any() if long_side else (after["high"] >= t["entry"]).any()):
                 t["status"] = "보유"
@@ -3349,6 +3388,65 @@ def update_tracks(tracks: List[Dict], loaded: Dict[str, tuple]) -> None:
                 t["status"] = "미체결"
         except Exception as e:
             print(f"[warn] 추적 갱신 실패 {t.get('symbol')}: {e}")
+
+
+def find_recent_signals(symbol: str, lookback: int = 18) -> List[Dict]:
+    """v30.2: 추천받아 들어갔는데 실전 추적에 안 보일 때 — 최근 lookback봉(4시간봉 18개 = 3일) 안에서
+    지금 켜둔 매매법 규칙으로 나왔던 신호를 Bitget 선물 차트로 다시 찾음. 최신순.
+    (그때의 거시 필터·동시 추천 개수 제한·스프레드·펀딩비 걸러내기는 다시 확인할 수 없어서 빼고 찾음 — 사용자가 고름)"""
+    sym = symbol.strip().upper()
+    sym = sym if "/" in sym else f"{sym}/{QUOTE}"
+    sym = sym.split(":")[0]
+    df = drop_unclosed(fetch_ohlcv("bitget", sym))
+    if df is None or len(df) < 120:
+        return []
+    df = df.reset_index(drop=True)
+    n = len(df)
+    lo = max(n - lookback, 60)
+    found = []
+    reg = trend_series(df)
+    for fam in ("돌파 후 되돌림", "추세 눌림목"):
+        if fam in ENABLED_FAMILIES:
+            found += [(fam, i, s) for i, s in v27_family_signals(df, fam, reg).items() if i >= lo]
+    if "돌파" in ENABLED_FAMILIES:
+        try:
+            bt = drop_unclosed(fetch_ohlcv("bitget", f"BTC/{QUOTE}"))
+            bt = bt.set_index("ts").reindex(df["ts"]).ffill().bfill().reset_index()
+            for i, s in generate_signals(df, bt, None, warmup=lo, families={"돌파"}).items():
+                if s.get("rr_cap", 0.0) < BOX_RR_MAX:
+                    found.append(("돌파", i, s))
+        except Exception as e:
+            print(f"[warn] 박스 돌파 신호 다시 찾기 실패 {sym}: {e}")
+    perps = _LAST_PERPS or set()
+    p_, m_ = perp_match(sym, perps) if perps else ("", 1)
+    out = []
+    for fam, i, s in sorted(found, key=lambda z: -z[1]):
+        ts = pd.Timestamp(df["ts"].iloc[i])
+        xr = EXIT_RULES.get(fam, {})
+        out.append({"symbol": sym, "family": fam, "bias": s["bias"], "direction": s["direction"], "signal_ts": str(ts),
+                    "close_kst": f"{ts + pd.Timedelta(TIMEFRAME) + pd.Timedelta(hours=9):%m-%d %H:%M}",
+                    "entry": float(df["close"].iloc[i]), "sl": float(s["sl"]), "tp1": float(s["tp1"]), "atr": float(s["atr"]),
+                    "frac": s.get("frac", xr.get("frac")), "trail": s.get("trail", xr.get("trail")), "hold": s.get("hold", xr.get("hold")),
+                    "perp": p_ or "", "mult": int(m_ or 1)})
+    return out
+
+
+def add_recovered_track(sig: Dict) -> str:
+    """v30.2: find_recent_signals로 찾은 신호를 실전 추적에 넣음(같은 신호가 이미 있으면 그대로). 바로 계산·저장·클라우드 올림."""
+    tracks = load_tracks()
+    key = f"{sig['symbol']}|{sig['bias']}|{sig['signal_ts']}"
+    if any(t["key"] == key for t in tracks):
+        return "이미 추적 중인 신호예요"
+    rec = {"key": key, "symbol": sig["symbol"], "exchange": "bitget", "bias": sig["bias"], "family": sig["family"],
+           "direction": sig["direction"], "signal_ts": sig["signal_ts"], "entry": sig["entry"], "sl": sig["sl"],
+           "tp1": sig["tp1"], "atr": sig["atr"], "is_chase": False, "market": True, "tags": ["직접 추가"],
+           "created": str(utc_now()), "status": "대기", "R": None, "group": coin_group(sig["symbol"]), "tier": "",
+           "frac": sig.get("frac"), "trail": sig.get("trail"), "hold": sig.get("hold"),
+           "perp": sig.get("perp", ""), "mult": int(sig.get("mult") or 1), "risk_mult": 1.0, "recovered": True}
+    update_tracks([rec], {})
+    _save_tracks([rec])
+    cloud_sync(force=True)
+    return f"추가했어요 · 상태 {rec['status']}"
 
 
 PYRAMID_TRIGGER_R = 1.0   # 불타기: 4시간봉 종가가 진입가 + 1R(손절폭만큼 유리) 처음 넘을 때 (v29 검증, 선택)
@@ -3402,6 +3500,8 @@ def tracking_summary(tracks: List[Dict], ref: Optional[Dict] = None) -> tuple:
         row["자동 방어"] = HEALTH_LABEL.get(h.get("state", "unknown"), "-")
         if fam in TRIAL_FAMILIES:
             row["단계"] = "✅ 승격(정상 리스크)" if family_promoted(tracks, ref, fam) else f"🧪 시험 운용(리스크 ¼, {len(closed)}/30건)"
+        elif fam in FIXED_FAMILY_RISK:
+            row["단계"] = f"📉 위험 {FIXED_FAMILY_RISK[fam]:g}배 고정(5년 검증)"
         elif fam in NEW_FAMILY_RISK:
             row["단계"] = "✅ 정상 리스크" if family_promoted(tracks, ref, fam) else f"🌱 위험 절반으로 시작({len(closed)}/30건)"
         rows.append(row)
@@ -3561,6 +3661,13 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         print(f"[warn] 실전 추적 갱신 실패: {e}")
     ref_ = load_lab_reference()
     promoted = {fam: family_promoted(tracks, ref_, fam) for fam in set(TRIAL_FAMILIES) | set(NEW_FAMILY_RISK)}
+    # v30.2: 같은 코인·방향 기록이 진행 중이면 새 추천은 추적에 안 들어감(코인당 한 포지션) → 카드에 알려줌
+    act_ = {(t["symbol"], t["direction"]): t for t in tracks if t["status"] in ACTIVE_TRACK}
+    for x in all_setups:
+        prev = act_.get((x.symbol, "long" if x.bias in LONG_BIASES else "short"))
+        x.already_tracked = (f"{prev['family']} · 신호 봉 마감 "
+                             f"{pd.Timestamp(prev['signal_ts']) + pd.Timedelta(TIMEFRAME) + pd.Timedelta(hours=9):%m-%d %H:%M}"
+                             if prev and prev["key"] != f"{x.symbol}|{x.bias}|{x.signal_ts}" else "")
     for x in all_setups:
         fam = SETUP_FAMILY.get(x.bias, "")
         st_ = health.get(fam, {}).get("state", "")
@@ -3569,7 +3676,10 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         if fam in TRIAL_FAMILIES and not promoted.get(fam):
             x.trial = True
             x.risk_mult *= TRIAL_RISK_MULT
-        if fam in NEW_FAMILY_RISK and not promoted.get(fam):   # v27 새 매매법: 실전 30건 확인 전까지 위험 절반
+        if fam in FIXED_FAMILY_RISK:                           # v30.3: 승격 없는 고정 비중
+            x.fixed_risk = FIXED_FAMILY_RISK[fam]
+            x.risk_mult *= FIXED_FAMILY_RISK[fam]
+        elif fam in NEW_FAMILY_RISK and not promoted.get(fam):   # v27 새 매매법: 실전 30건 확인 전까지 위험 절반
             x.half_start = True
             x.risk_mult *= NEW_FAMILY_RISK[fam]
     active = [x for x in all_setups if x.health != "paused"]
@@ -3618,7 +3728,8 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
     return {"regime": regime, "breaker": breaker, "setups": setups, "all_setups": all_setups, "health": health,
             "direction": direction,
             "trial": {fam: ("승격" if promoted.get(fam) else "시험 운용") for fam in TRIAL_FAMILIES},
-            "new_families": {fam: ("정상 위험" if promoted.get(fam) else "위험 절반") for fam in NEW_FAMILY_RISK},
+            "new_families": {**{fam: ("정상 위험" if promoted.get(fam) else "위험 절반") for fam in NEW_FAMILY_RISK},
+                             **{fam: f"위험 {v:g}배 고정" for fam, v in FIXED_FAMILY_RISK.items()}},
             "macro_filter": macro_info,
             "risk_cfg": risk_cfg, "asof": pd.Timestamp.now(), "asof_utc": utc_now(),
             "timeframe": TIMEFRAME, "filter_stats": stats}
@@ -4338,9 +4449,14 @@ def load_portfolio_log() -> List[Dict]:
 
 
 def _save_portfolio_log(log: List[Dict]) -> None:
+    """v30.2: 실전 추적과 같이 파일에 있는 기록과 합쳐서 저장(동시에 저장될 때 날짜 기록이 사라지지 않게)."""
     try:
-        with open(PORT_LOG_FILE, "w", encoding="utf-8") as f:
-            json.dump(log[-1000:], f, ensure_ascii=False)
+        with _FILE_LOCK:
+            mine = json.dumps(log, ensure_ascii=False, default=str)
+            cur = open(PORT_LOG_FILE, encoding="utf-8").read() if os.path.exists(PORT_LOG_FILE) else ""
+            merged = json.loads(_merge_port_log(mine, cur) if cur.strip() else mine)
+            with open(PORT_LOG_FILE, "w", encoding="utf-8") as f:
+                json.dump(merged[-1000:], f, ensure_ascii=False, default=str)
     except Exception as e:
         print(f"[warn] 포트폴리오 기록 저장 실패: {e}")
 
@@ -5329,6 +5445,179 @@ def export_perp_data(n_coins: int = 100, days: int = 1825, include_mark: bool = 
                        df[cols].to_csv(index=False, float_format="%.10g"))
         z.writestr("meta.json", json.dumps(meta, ensure_ascii=False, default=str))
     return buf.getvalue()
+
+
+# ==========================================================================
+# v30.1: 시장가 매수·매도 거래량(Binance) 내보내기 — '매집' 검증용
+#  캔들 거래량만으로는 누가 샀는지 알 수 없어서(2026-10-13 매집 검증 9개 신호 모두 탈락),
+#  시장가로 산 거래량(taker buy)이 들어 있는 Binance 캔들을 받아 CVD(시장가 매수 − 매도 누적)로 다시 검증.
+#  Binance는 미국 서버(폰용 Streamlit Cloud)에서 막혀 있어(HTTP 451) PC에서만 받을 수 있음.
+# ==========================================================================
+_BN_API = {"spot": ("https://api.binance.com", "/api/v3/klines", "/api/v3/exchangeInfo"),
+           "perp": ("https://fapi.binance.com", "/fapi/v1/klines", "/fapi/v1/exchangeInfo")}
+_BN_PREFIX = re.compile(r"^(1000000|100000|10000|1000|1M)(?=[A-Z])")
+
+
+class BinanceBlocked(RuntimeError):
+    pass
+
+
+def _bn_get(market: str, path: str, params: Optional[dict] = None, tries: int = 4):
+    """Binance 공개 API GET. 451/403(지역 차단)은 바로 BinanceBlocked, 429/418(과부하)은 기다렸다 재시도."""
+    host = _BN_API[market][0]
+    last = ""
+    for _ in range(tries):
+        try:
+            r = requests.get(host + path, params=params or {}, timeout=20)
+        except requests.exceptions.RequestException as e:
+            last = str(e)[:80]
+            time.sleep(2.0)
+            continue
+        if r.status_code in (451, 403):
+            raise BinanceBlocked(f"Binance 접속이 막혀 있어요(HTTP {r.status_code}). 이 네트워크·서버에서는 받을 수 없어요 — PC에서 실행해 주세요.")
+        if r.status_code in (418, 429):
+            time.sleep(min(int(r.headers.get("Retry-After", "30") or 30), 120))
+            continue
+        if r.status_code != 200:
+            last = f"HTTP {r.status_code} {r.text[:60]}"
+            time.sleep(2.0)
+            continue
+        used = r.headers.get("X-MBX-USED-WEIGHT-1M") or r.headers.get("x-mbx-used-weight-1m")
+        if used and int(used) > (1800 if market == "perp" else 4800):   # 분당 한도의 75% 넘으면 쉬어 감
+            time.sleep(20)
+        return r.json()
+    raise RuntimeError(f"Binance {market} {path} 조회 실패: {last}")
+
+
+def binance_symbol_map(market: str) -> Dict[str, tuple]:
+    """{기초 코인: (Binance 심볼, 배수)} — 선물은 1000PEPE처럼 배수 표기를 기초 코인으로 되돌림(같은 이름이 있으면 그것 우선)."""
+    info = _bn_get(market, _BN_API[market][2])
+    out: Dict[str, tuple] = {}
+    for s in info.get("symbols", []):
+        if s.get("quoteAsset") != QUOTE or s.get("status") != "TRADING":
+            continue
+        if market == "perp" and s.get("contractType") != "PERPETUAL":
+            continue
+        if market == "spot" and not s.get("isSpotTradingAllowed", True):
+            continue
+        b = s.get("baseAsset", "")
+        mm = _BN_PREFIX.match(b)
+        if mm:
+            pre = mm.group(1)
+            mult = 1_000_000 if pre == "1M" else int(pre)
+            out.setdefault(b[len(pre):], (s["symbol"], mult))
+        out[b] = (s["symbol"], 1)                       # 이름 그대로인 심볼이 있으면 그걸 씀
+    return out
+
+
+def _binance_klines(market: str, bsym: str, tf: str, days: int) -> pd.DataFrame:
+    """Binance 캔들(시장가 매수 거래량 포함)을 처음부터 끝까지 이어 받기. 상장 전 시작 시각을 주면 상장일부터 돌려줌."""
+    dur = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}[tf]
+    now = int(time.time() * 1000)
+    t = now - days * 86_400_000
+    t -= t % dur
+    rows: List = []
+    for _ in range(5000):
+        data = _bn_get(market, _BN_API[market][1], {"symbol": bsym, "interval": tf, "startTime": t, "limit": 1000})
+        if not data:
+            break
+        for x in data:
+            if int(x[6]) >= now:                         # 아직 안 끝난 봉 제외
+                continue
+            rows.append([int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5]),
+                         int(x[8]), float(x[9])])
+        t = int(data[-1][0]) + dur
+        if len(data) < 1000 or t >= now:
+            break
+        time.sleep(0.15 if market == "perp" else 0.06)
+    cols = ["ts", "open", "high", "low", "close", "volume", "trades", "taker_buy_volume"]
+    df = pd.DataFrame(rows, columns=cols)
+    return df.drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
+
+
+def _export_cached_bn(market: str, bsym: str, tf: str, days: int) -> pd.DataFrame:
+    import tempfile
+    folder = os.path.join(tempfile.gettempdir(), "cmr_export_cache")
+    path = os.path.join(folder, re.sub(r"[^A-Za-z0-9]+", "_", f"bn_{market}_{bsym}_{tf}_{days}") + ".pkl")
+    try:
+        if os.path.exists(path) and time.time() - os.path.getmtime(path) < EXPORT_CACHE_HOURS * 3600:
+            return pd.read_pickle(path)
+    except Exception:
+        pass
+    df = _binance_klines(market, bsym, tf, days)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        df.to_pickle(path)
+    except Exception:
+        pass
+    return df
+
+
+def export_taker_data(n_coins: int = 100, days: int = 1825, markets=("spot", "perp"), progress_cb=None) -> Dict[str, bytes]:
+    """v30.1: Binance 현물·선물 4시간봉 + 시장가 매수 거래량 → 시장별 zip {market: bytes}.
+    코인 목록은 지금까지의 연구 자료와 같음(Bitget 선물 있는 코인, 현물 거래량 순위). Binance에 없는 코인은 빠짐.
+    단위는 현물 기준으로 맞춤(선물 1000PEPE 등은 가격÷배수, 거래량×배수). 일봉은 4시간봉 6개를 합쳐 만들면 됨(UTC 00시 기준)."""
+    import io as _io
+    import zipfile
+    markets = [m for m in markets if m in _BN_API]
+    if not markets:
+        raise RuntimeError("시장을 하나 이상 고르세요.")
+    maps = {m: binance_symbol_map(m) for m in markets}          # 여기서 막히면 BinanceBlocked로 바로 끝남
+    perps = bitget_perp_symbols()
+    if not perps:
+        raise RuntimeError("Bitget 선물 목록을 받지 못했어요. 잠시 후 다시 시도해 주세요.")
+    uni = build_universe(n_coins + 1, perps, rank_by="spot")
+    syms = [f"BTC/{QUOTE}"] + [x for x in uni if x != f"BTC/{QUOTE}"][:n_coins]
+    jobs = len(syms) * len(markets)
+    k = 0
+    out: Dict[str, bytes] = {}
+    for market in markets:
+        meta = {"kind": f"binance_taker_{market}", "made_at": str(utc_now()), "version": APP_VERSION, "days": days,
+                "timeframe": "4h", "coins": [], "errors": [],
+                "note": ("Binance " + ("현물" if market == "spot" else "USDT-M 선물") + " 4시간봉. taker_buy_volume = 시장가로 산 수량, "
+                         "시장가 매도 수량 = volume − taker_buy_volume. trades = 체결 건수. 단위는 현물 기준(가격÷mult, 수량×mult).")}
+        frames: List[pd.DataFrame] = []
+        for sym in syms:
+            base = sym.split("/")[0]
+            if progress_cb:
+                progress_cb(k, jobs, f"{'현물' if market == 'spot' else '선물'} {base}")
+            k += 1
+            hit = maps[market].get(base)
+            if not hit:
+                meta["errors"].append(f"{sym}: Binance {'현물' if market == 'spot' else '선물'} 없음")
+                continue
+            bsym, mult = hit
+            try:
+                d = _export_cached_bn(market, bsym, "4h", days + 100)
+            except BinanceBlocked:
+                raise
+            except Exception as e:
+                meta["errors"].append(f"{sym}: {str(e)[:80]}")
+                continue
+            if d is None or not len(d):
+                meta["errors"].append(f"{sym}: 캔들 없음")
+                continue
+            d = d.copy()
+            if mult != 1:
+                for c in ("open", "high", "low", "close"):
+                    d[c] = d[c] / mult
+                for c in ("volume", "taker_buy_volume"):
+                    d[c] = d[c] * mult
+            frames.append(d.assign(symbol=sym))
+            meta["coins"].append({"symbol": sym, "binance": bsym, "mult": mult, "rank": len(meta["coins"]), "bars_4h": len(d),
+                                  "first": str(pd.to_datetime(d["ts"].iloc[0], unit="ms"))})
+        meta["errors"] = meta["errors"][:80]
+        if progress_cb:
+            progress_cb(k, jobs, "압축 중")
+        buf = _io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            if frames:
+                df = pd.concat(frames, ignore_index=True)
+                cols = ["symbol", "ts", "open", "high", "low", "close", "volume", "trades", "taker_buy_volume"]
+                z.writestr(f"taker_{market}_4h.csv", df[cols].to_csv(index=False, float_format="%.8g"))
+            z.writestr("meta.json", json.dumps(meta, ensure_ascii=False, default=str))
+        out[market] = buf.getvalue()
+    return out
 
 
 # ==========================================================================
