@@ -224,6 +224,12 @@ def exec_rules(setup) -> list:
         else:
             out.append(f"목표1 도달 시: {int(frac * 100)}% 익절 → 남은 물량 손절을 진입가로 → "
                        f"거래소 트레일링 주문(활성화 가격 = 목표1, 되돌림 {cb:.1f}%)")
+    # 2026-10-16 추세 유효/깨짐 지표 10종 5년 검증: 눌림목은 진입 때 이미 추세가 깨져 보이는 게 정상(약 80%),
+    # 그걸 이유로 미리 청산하면 거래당 +0.26R → +0.01~0.10R (3자료 모두). 박스·되돌림은 영향 거의 없음.
+    from crypto_market_regime import SETUP_FAMILY
+    if SETUP_FAMILY.get(getattr(setup, "bias", ""), "") == "추세 눌림목":
+        out.append("눌림목은 진입 때 이미 추세가 깨진 것처럼 보이는 게 정상(고점·저점 이탈·슈퍼트렌드 반대가 약 80%) — "
+                   "그걸 이유로 손절·트레일링 전에 미리 청산하지 않기 (5년 검증: 그렇게 청산하면 거래당 +0.26R → +0.01~0.10R)")
     add = pyramid_line(setup)
     if add:
         out.append(add)
