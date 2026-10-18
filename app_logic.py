@@ -37,8 +37,11 @@ BIAS_INFO = {
     "div_short": ("short", "숏", "📐 위치 다이버전스(하락 추세 속 고점) · 시장가"),
     "pb_long": ("long", "롱", "📈 추세 눌림목(상승 추세 속 눌림 → 20EMA 위로 회복) · 시장가"),
     "pb_short": ("short", "숏", "📉 반등 숏(하락 추세 속 반등 → 20EMA 아래로 재마감) · 시장가"),
+    "diag_long": ("long", "롱", "🧪 상승 빗각 지지(일봉 · 한국 09시 마감) · 시장가"),
+    "wick_long": ("long", "롱", "🧪 아래꼬리 2연속(일봉 · 한국 09시 마감) · 시장가"),
 }
-FAMILY_TAG = {"돌파 후 되돌림": "🔁 돌파 후 되돌림", "위치 다이버전스": "📐 위치 다이버전스", "추세 눌림목": "📈 추세 눌림목"}
+FAMILY_TAG = {"돌파 후 되돌림": "🔁 돌파 후 되돌림", "위치 다이버전스": "📐 위치 다이버전스", "추세 눌림목": "📈 추세 눌림목",
+              "빗각 지지": "🧪 빗각 지지", "아래꼬리 연속": "🧪 아래꼬리 연속"}
 
 CSS = """
 .block-container{padding-top:1.1rem;padding-bottom:3rem;max-width:720px}
@@ -190,7 +193,7 @@ def market_price(setup) -> float:
 
 def entry_label(setup) -> str:
     """신고점 돌파·즉시 진입은 시장가, 나머지는 지정가."""
-    market = setup.bias.startswith(("donchian", "st_", "retest_", "div_", "pb_")) or "즉시 진입" in (setup.entry_note or "")
+    market = setup.bias.startswith(("donchian", "st_", "retest_", "div_", "pb_", "diag_", "wick_")) or "즉시 진입" in (setup.entry_note or "")
     return "진입(시장가)" if market else "진입(지정가)"
 
 
@@ -227,6 +230,13 @@ def exec_rules(setup) -> list:
     # 2026-10-16 추세 유효/깨짐 지표 10종 5년 검증: 눌림목은 진입 때 이미 추세가 깨져 보이는 게 정상(약 80%),
     # 그걸 이유로 미리 청산하면 거래당 +0.26R → +0.01~0.10R (3자료 모두). 박스·되돌림은 영향 거의 없음.
     from crypto_market_regime import SETUP_FAMILY
+    if SETUP_FAMILY.get(getattr(setup, "bias", ""), "") == "빗각 지지":
+        out.append("빗각 지지는 일봉 신호라 손절이 넓어요(진입가 − 2 일봉 ATR) — 수량은 이 손절폭 기준으로 계산했으니 레버리지만 지키기. "
+                   "5년 검증: 승률 약 40%, 평균 보유 17일, 수익은 소수의 큰 상승(5R 넘는 거래)에서 나옴 — 작은 이익에 미리 팔지 않기")
+    if SETUP_FAMILY.get(getattr(setup, "bias", ""), "") == "아래꼬리 연속":
+        out.append("아래꼬리 연속은 일봉 신호라 손절이 넓어요(진입가 − 2 일봉 ATR) — 수량은 이 손절폭 기준으로 계산했으니 레버리지만 지키기. "
+                   "5년 검증: 승률 약 43%, 평균 보유 17일, 5R에 닿은 뒤에야 최고가 − 3 ATR(4시간봉)로 따라 올리며, "
+                   "수익은 소수의 큰 상승에서 나옴 — 작은 이익에 미리 팔지 않기")
     if SETUP_FAMILY.get(getattr(setup, "bias", ""), "") == "추세 눌림목":
         out.append("눌림목은 진입 때 이미 추세가 깨진 것처럼 보이는 게 정상(고점·저점 이탈·슈퍼트렌드 반대가 약 80%) — "
                    "그걸 이유로 손절·트레일링 전에 미리 청산하지 않기 (5년 검증: 그렇게 청산하면 거래당 +0.26R → +0.01~0.10R)")
@@ -264,6 +274,16 @@ def elapsed_note(setup):
     if h < 0:
         return None
     t = f"{int(h * 60)}분" if h < 1 else f"{h:.1f}시간"
+    if setup.bias.startswith("diag_"):  # v31 5년 검증(Bitget 선물): 09시 +0.51R · 13시 +0.50R · 17시 +0.49R · 21시 +0.44R
+        if h >= 13:
+            return (f"⛔ 일봉 마감(09시) 후 {t} — 검증해 본 범위(21시까지) 밖이라 건너뛰세요", "stop")
+        return (f"⏱ 일봉 마감(09시) 후 {t} — 빗각 지지는 그날 안에 들어가도 괜찮아요"
+                f"(5년 검증 거래당: 09시 +0.51R · 13시 +0.50R · 17시 +0.49R · 21시 +0.44R)", "ok")
+    if setup.bias.startswith("wick_"):  # v32 5년 검증(Bitget 선물): 09시 +0.71R · 13시 +0.70R · 17시 +0.63R · 21시 +0.62R
+        if h >= 13:
+            return (f"⛔ 일봉 마감(09시) 후 {t} — 검증해 본 범위(21시까지) 밖이라 건너뛰세요", "stop")
+        return (f"⏱ 일봉 마감(09시) 후 {t} — 아래꼬리 연속은 그날 안에 들어가도 괜찮아요"
+                f"(5년 검증 거래당: 09시 +0.71R · 13시 +0.70R · 17시 +0.63R · 21시 +0.62R)", "ok")
     if setup.bias.startswith("pb_"):    # 5년 검증: 바로 +0.29R · 4시간 늦게 +0.31R · 8시간 늦게 +0.25R
         if h >= 12:
             return (f"⛔ 신호 후 {t} — 12시간이 넘었어요. 검증해 본 범위(8시간) 밖이라 건너뛰세요", "stop")
@@ -519,15 +539,43 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
     if getattr(setup, "event_note", ""):
         warn += (f'<div class="over">📅 {e(setup.event_note)} — 크게 흔들리는 시간대라 권장 리스크를 절반으로 계산했어요. '
                  f'검증에서 이 시간대 진입은 평균 −0.25R이었으니 가능하면 건너뛰세요</div>')
-    if getattr(setup, "fixed_risk", None):
+    if getattr(setup, "drift_note", ""):     # v32.3 FOMC 선반영 참고(표시만)
+        warn += f'<div class="plan">📐 {e(setup.drift_note)}</div>'
+    if getattr(setup, "fixed_risk", None) and fam_ in ("빗각 지지", "아래꼬리 연속"):
+        warn += (f'<div class="over">✅ {fam_} 승격 — 실전 30건 확인을 통과했지만 5년 계좌 모의를 0.5배로 해서 '
+                 f'위험 {setup.fixed_risk:g}배까지만 써요. 수량은 이미 낮춰서 계산했어요</div>')
+    elif getattr(setup, "fixed_risk", None):
         warn += (f'<div class="over">📉 추세 눌림목은 위험 {setup.fixed_risk:g}배로 고정이에요 — 거래당 수익이 박스 돌파·되돌림보다 작아, '
                  '5년 검증에서 비중을 낮춘 쪽이 계좌 효율(연수익÷낙폭)이 더 좋았어요. 수량은 이미 낮춰서 계산했어요</div>')
+    if getattr(setup, "sunday_half", False):
+        warn += ('<div class="over">🗓 일요일 진입 — 5년 검증에서 일요일에 들어간 박스 돌파·되돌림·눌림목은 손절이 잦아'
+                 '(72~76%, 다른 날 56~58%) 거래당 손해였어요. 조용한 일요일 변동폭으로 잡은 손절이 월요일 오전 변동성에 걸리기 쉬워 '
+                 '리스크를 절반으로 계산했어요</div>')
     if getattr(setup, "half_start", False):
         warn += ('<div class="over">🌱 새 매매법 — 실전 기록이 쌓이기 전이라 리스크를 절반으로 낮춰 수량을 계산했어요 '
                  '(실전 추적 30건 평균이 플러스면 자동으로 정상 리스크)</div>')
-    if getattr(setup, "trial", False):
+    if getattr(setup, "trial", False) and fam_ == "빗각 지지":
+        warn += ('<div class="over">🧪 시험 운용 신호(빗각 지지) — 5년 검증에서 거래당 성과는 좋았지만 사전 기준(사이클 교차·전 신호 계좌)을 '
+                 '다 넘지 못해 리스크를 ¼로 낮춰 수량을 계산했어요. 실전 30건 평균이 플러스면 0.5배로 승격</div>')
+    elif getattr(setup, "trial", False) and fam_ == "아래꼬리 연속":
+        warn += ('<div class="over">🧪 시험 운용 신호(아래꼬리 연속) — 5년 검증의 사전 기준(3자료·사이클·플라시보·계좌)을 모두 통과했지만 '
+                 '새 매매법이라 실전 30건을 확인할 때까지 리스크를 ¼로 낮춰 수량을 계산했어요. 실전 30건 평균이 플러스면 0.5배로 승격</div>')
+    elif getattr(setup, "trial", False):
         warn += ('<div class="over">🧪 시험 운용 신호 — 리스크를 ¼로 낮춰 수량을 계산했어요 '
                  '(실전 30건이 과거 기준선 안에 들면 자동으로 정상 리스크로 승격)</div>')
+    # v31: 작은 계좌에서 위험을 낮춘 신호(시험 운용 ¼·눌림목 ½)는 주문 금액이 거래소 최소 주문보다 작을 수 있음
+    try:
+        from crypto_market_regime import bitget_min_notional  # 지연 임포트
+        mult_ = int(getattr(setup, "perp_mult", 1) or 1)
+        mn_ = bitget_min_notional(getattr(setup, "perp_symbol", "") or "", market_price(setup) * mult_) or 5.0
+    except Exception:
+        mn_ = 5.0
+    if sizing.get("notional") and 0 < sizing["notional"] < mn_:
+        need_ = mn_ / sizing["notional"] * risk_pct
+        tip_ = ("시험 운용 신호라 건너뛰고 결과만 지켜보는 걸 권해요(앱이 추천 결과를 자동으로 기록해요)"
+                if getattr(setup, "trial", False) else "건너뛸지, 최소 금액으로 넣고 더 큰 위험을 감수할지 정하세요")
+        warn += (f'<div class="over">🪙 주문 금액 ${fmt_money(sizing["notional"])}가 Bitget 최소 주문(약 ${fmt_money(mn_)})보다 작아요 — '
+                 f'최소 금액으로 넣으면 손절 시 손실이 계좌의 약 {need_:.2f}%(계산한 위험 {risk_pct:g}%)가 돼요. {tip_}</div>')
     if getattr(setup, "health", "") == "caution":
         warn += ('<div class="over">🛡 자동 방어: 이 신호 유형의 최근 실전 성과가 기준 아래라 '
                  '권장 리스크를 절반으로 낮춰 수량을 계산했어요</div>')

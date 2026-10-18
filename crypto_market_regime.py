@@ -42,7 +42,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-15 v30.3"            # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-18 v32.3"            # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -50,7 +50,7 @@ TRACK_FILE = "signal_tracking.json"               # 실전 추천 자동 추적 
 LAB_REF_FILE = "lab_reference.json"               # 자동 방어 기준선(연구실 실행 때마다 신호 유형별 과거 성과 저장)
 AUTO_DEFENSE = True                               # 실전 성과가 기준선 아래로 떨어진 신호 유형을 자동 감축·중지
 FALLBACK_LOW_R = -0.3                             # 연구실 기준선이 없을 때 쓰는 보수적 고정 기준(최근 평균 R)
-ENABLED_FAMILIES = {"돌파", "돌파 후 되돌림", "추세 눌림목"}   # 추천할 신호 유형 (v29: 5년·두 사이클 교차 검증에서 살아남은 3가지)
+ENABLED_FAMILIES = {"돌파", "돌파 후 되돌림", "추세 눌림목", "빗각 지지", "아래꼬리 연속"}   # 추천할 신호 유형 (v29 3가지 + 🧪 시험 운용 v31 빗각 지지 · v32 아래꼬리 연속)
 TIMEFRAME = "4h"                                  # 스윙 트레이딩 기준 봉
 OHLCV_LIMIT = 600                                 # 4h 캔들 개수 (EMA200이 제대로 계산되려면 수백 개 필요 — 200개면 첫 봉 비중이 13%나 남음)
 HTF_LIMIT = 300                                   # 일봉 캔들 개수 (일봉 EMA200용)
@@ -73,6 +73,8 @@ EXIT_RULES = {
     "돌파 후 되돌림": {"stop_atr": 0.0, "tp_box": 2.0, "frac": 0.0, "trail": 0.75, "hold": 60},
     "추세 눌림목": {"stop_atr": 0.0, "tp_R": 4.0, "frac": 0.0, "trail": 0.75, "hold": 60},
     "위치 다이버전스": {"stop_atr": 0.0, "tp_R": 3.0, "frac": 0.0, "trail": 0.75, "hold": 60},   # v29 기본 꺼짐(5년 교차 검증 탈락)
+    "빗각 지지": {"stop_atr": 0.0, "tp_R": 5.0, "frac": 0.0, "trail": 1.5, "hold": 180},   # v31 시험 운용(손절 = 진입가 − 2 일봉 ATR)
+    "아래꼬리 연속": {"stop_atr": 0.0, "tp_R": 5.0, "frac": 0.0, "trail": 3.0, "hold": 180},   # v32 시험 운용(손절 = 진입가 − 2 일봉 ATR)
 }
 # 새로 넣은 매매법은 위험 절반으로 시작 → 실전 추적 30건 평균이 플러스(기준선 안)면 자동으로 정상 위험
 NEW_FAMILY_RISK = {"돌파 후 되돌림": 0.5, "위치 다이버전스": 0.5}
@@ -80,7 +82,40 @@ NEW_FAMILY_RISK = {"돌파 후 되돌림": 0.5, "위치 다이버전스": 0.5}
 # 5년·3자료(Bitget 선물·현물·Binance 선물)×2사이클 계좌 모의에서 ½로 두는 쪽이 전 신호 6칸 모두 연수익÷낙폭이 높았음
 # (균등 1·1·1 대비, 2026-10-14 검증) → 실전 30건 뒤에도 1로 올리지 않음
 FIXED_FAMILY_RISK = {"추세 눌림목": 0.5}
-LONG_BIASES = ("long", "wait_breakout_long", "range_fade_long", "donchian_long", "st_long", "retest_long", "div_long", "pb_long")
+# v31 🧪 빗각 지지 롱(시험 운용) — 2026-10-17 사용자 차트 방식 빗각 5년 검증(diag4):
+#   일봉 꼭짓점 좌우 10일, 상승 각도 = 주요 저점 A → A~다음 주요 고점 사이 몸통이 가장 큰 양봉의 고가, 그 각도를 B 뒤 확정된
+#   주요 꼭짓점 최근 6곳에 평행 복사. 직전 종가는 선 위 · 저가가 선 + 0.5 일봉 ATR 안 · 종가 선 위 · 종가 > 200일 평균 → 09시 시장가.
+#   손절 진입가 − 2 일봉 ATR, 목표 5R 뒤 최고가 − 1.5 ATR(4시간봉) 추적, 최대 30일(180봉).
+#   거래당 Bitget 선물 +0.88/+0.38R(2021~23/2024~), 현물 +0.65/+0.40R, Binance +0.92/+0.39R · 가짜 빗각보다 나은 칸 89% ·
+#   수동 시각 계좌 6칸 모두 개선. 사이클 교차(t 0.9)·전 신호 계좌(6칸 중 2칸 낮아짐) 미달 → 위험 ¼ 시험 운용, 승격해도 0.5배
+DIAG_K, DIAG_COPIES, DIAG_ZONE_ATR = 10, 6, 0.5
+DIAG_STOP_ATR_D, DIAG_TP_R = 2.0, 5.0
+DIAG_DAILY_LIMIT = 500                            # 일봉 개수 (200일 평균 + 꼭짓점·각도용)
+FIXED_TRIAL_FAMILIES = {"빗각 지지", "아래꼬리 연속"}   # 연구실 설정을 초기화·적용해도 시험 운용으로 남는 유형
+TRIAL_PROMOTED_RISK = {"빗각 지지": 0.5, "아래꼬리 연속": 0.5}   # 실전 30건 뒤 승격해도 이 배수(5년 계좌 모의를 0.5배로 했음)
+STATIC_FAMILY_REF = {"빗각 지지": (0.50, 2.35), "아래꼬리 연속": (0.71, 2.42)}   # 자동 방어 기준선(5년 Bitget 선물 거래당 평균·표준편차) — 연구실 기준선이 없을 때
+# v31.1 사용자 결정(2026-10-17): 🧪 빗각 지지는 BTC 대상승 국면(일봉 종가 > 200일 평균, 60일 수익률 ≥ +20%)일 때만.
+#   5년 확인(판정 기준 아님): 대상승 거래당 Bitget +0.75/+0.60R(52/100건) vs 전체 +0.88/+0.38R(63/192건).
+#   지금 3종 + 0.5배 같은 낙폭 연수익은 관문 없을 때보다 전 신호·수동 모두 6칸 중 2칸만 높음. v32.2: 사용자 결정으로 항상 켬(사이드바 설정 없앰).
+DIAG_BULL_ONLY = True
+# v32 🧪 아래꼬리 연속 롱(시험 운용) — 2026-10-17 캔들 꼬리 5년 검증(사전 등록 wx_prereg.txt, 254만 규칙):
+#   일봉 아래꼬리(min(시가,종가) − 저가)가 0.5 일봉 ATR 이상이고 위꼬리보다 긴 봉이 정확히 2번째 연속으로 마감 ·
+#   BTC 일봉 종가 > 200일 평균 · 코인 종가 > EMA20(일봉) → 한국 09시 시장가. 손절 진입가 − 2 일봉 ATR,
+#   목표 5R 뒤 최고가 − 3 ATR(4시간봉) 추적, 최대 30일(180봉).
+#   거래당 Bitget 선물 +0.96/+0.60R(2021~23/2024~, 90/215건), 현물 +0.98/+0.76R, Binance +0.81/+0.65R ·
+#   날짜 밀기 19회 최대보다 큼(월 +3.7R vs +1.7R) · 탐색 전체 플라시보 5회보다 큼 · 일봉 같은 방향 연속 묶음 안 사이클 교차 통과 ·
+#   지금 3종 + 0.5배 같은 낙폭 연수익 전 신호 6칸·수동 6칸 모두 높음 → 사전 기준 통과 → 위험 ¼ 시험 운용, 승격해도 0.5배
+WICK_ATR, WICK_RUN = 0.5, 2
+WICK_STOP_ATR_D, WICK_TP_R = 2.0, 5.0
+# v32.1 사용자 결정(2026-10-18): 일요일(한국 시각, 신호 봉 마감 기준) 진입은 지금 3종 위험 ½.
+#   5년 검증(cal_prereg.txt): 일요일 진입 거래당 Bitget −0.43/−0.25R · 현물 −0.29/−0.22R · Binance −0.18/−0.12R(2021~23/2024~),
+#   다른 요일은 모두 +. 손절 비율 72~76%(다른 날 56~58%) — 조용한 일요일 ATR로 잡은 좁은 손절이 월요일 오전 변동성에 걸림.
+#   같은 낙폭 계좌: 수동 6칸 모두 높음 · 전 신호 5/6칸(Binance 2024~ −2%p) → 사전 기준(전 신호 6/6)엔 한 칸 모자라 사용자 결정으로 적용.
+SUNDAY_HALF = True
+SUNDAY_HALF_FAMILIES = {"돌파", "돌파 후 되돌림", "추세 눌림목"}
+SUNDAY_RISK_MULT = 0.5
+LONG_BIASES = ("long", "wait_breakout_long", "range_fade_long", "donchian_long", "st_long", "retest_long", "div_long", "pb_long",
+               "diag_long", "wick_long")
 # v29 박스 돌파 진입: 직전 90봉(15일) 박스 · 거래량 20봉 평균의 2배 이상 · 경계 밖 1 ATR 이내 마감(멀리 튄 봉은 추격 안 함)
 BOX_LOOKBACK = 90
 BOX_VOL_MIN = 2.0
@@ -97,7 +132,7 @@ DONCHIAN_N = {"4h": 120, "1h": 480}
 DONCHIAN_VARIANT = "atr"   # atr(손절 2ATR·목표 3ATR) | structure(구조 기반) | weekly | volume | tsm (연구실에서 정함)
 DONCHIAN_VARIANT_LABEL = {"atr": "기본(손절 2ATR·목표 3ATR)", "structure": "구조 기반(돌파 고점 아래 손절·다음 저항 목표)",
                           "weekly": "주봉 추세 일치", "volume": "거래량 동반", "tsm": "포트폴리오 보유 코인"}
-TRIAL_FAMILIES: set = set()   # 🧪 시험 운용 중인 신호 유형 (리스크 ¼로 추천, 실전 30건이 기준선 안이면 자동 승격)
+TRIAL_FAMILIES: set = set(FIXED_TRIAL_FAMILIES)   # 🧪 시험 운용 중인 신호 유형 (리스크 ¼로 추천, 실전 30건이 기준선 안이면 자동 승격)
 TSM_TRIAL = False             # 추세 포트폴리오 시험 운용 (비중 ¼)
 TRIAL_RISK_MULT = 0.25
 HOLD_MIN_R = 0.10             # 2차 연구실부터: 확인 구간 평균 +0.1R 이상이어야 함
@@ -1258,6 +1293,7 @@ class CoinSetup:
     max_hold: Optional[int] = None      # v27: 최대 보유 봉 수
     half_start: bool = False            # v27: 새 매매법 — 위험 절반으로 시작
     fixed_risk: Optional[float] = None  # v30.3: 승격 없이 고정한 위험 비중(추세 눌림목 0.5)
+    sunday_half: bool = False           # v32.1: 일요일 진입 — 위험 ½
     already_tracked: str = ""           # v30.2: 같은 코인·방향 추적 기록이 진행 중이면 그 설명
 
 
@@ -1646,6 +1682,8 @@ REJECT_LABELS = {
     "htf_against": "일봉 추세와 반대", "wide_spread": "스프레드 넓음", "funding_hot": "펀딩비 과열",
     "low_rr": "손익비 부족", "family_off": "꺼둔 신호 유형", "no_donchian": "신고점 돌파 없음",
     "tag_filter": "필수 표시 없음(연구실 설정)", "donchian_filter": "신고점 돌파 조건 미충족(연구실 설정)",
+    "phase_gate": "BTC 대상승 아님(빗각 지지는 대상승일 때만)",
+    "wick_gate": "BTC 200일선 아래 또는 코인 EMA20 아래(아래꼬리 연속 조건)",
 }
 
 
@@ -2213,6 +2251,227 @@ def build_divergence_setup(symbol: str, exchange_id: str, df: pd.DataFrame, btc_
     return _v27_setup("위치 다이버전스", "div", s, symbol, exchange_id, df, btc_df, price, alt_df, note)
 
 
+# --------------------------------------------------------------------------
+# v31 🧪 빗각 지지 롱 (일봉) — 연구 코드 diag4_lib.build / signals(L1, k=10, B2, 200일선, 닿음 0.5 ATR)와 같은 계산
+# --------------------------------------------------------------------------
+_DAILY_CACHE: Dict[tuple, tuple] = {}     # (거래소, 심볼) → (오늘 UTC 날짜, 마감 일봉 df) — 일봉은 하루 한 번만 바뀜
+
+
+def _diag_pivots(x: np.ndarray, k: int, hi: bool) -> np.ndarray:
+    """좌우 k봉 중 최고(저) = 꼭짓점. 확정에는 오른쪽 k봉이 필요(p + k < n)."""
+    xs = pd.Series(x)
+    ext = (xs.rolling(2 * k + 1, center=True).max() if hi else xs.rolling(2 * k + 1, center=True).min()).to_numpy()
+    p = np.flatnonzero(x == ext)
+    return p[(p >= k) & (p + k < len(x))]
+
+
+def diag_support_signal(d: pd.DataFrame, k: int = DIAG_K, m_copies: int = DIAG_COPIES) -> Optional[Dict]:
+    """마감된 일봉(UTC 00시 기준) 마지막 봉에 '상승 빗각 지지' 신호가 있으면 정보를, 없으면 None.
+    상승 각도: 확정된 주요 고점 B마다 직전 주요 저점 A → A~B 사이 몸통(종가−시가)이 가장 큰 양봉의 고가. 기울기 = 가격차 ÷ 일수.
+    선: 가장 최근에 확정된 각도를 B 뒤(B 포함) 확정된 주요 꼭짓점(고점·저점) 최근 6곳에 평행 복사.
+    신호: 어제도 같은 각도였고 · 복사 꼭짓점이 어제까지 확정 · 어제 종가 > 어제 선 값 · 오늘 저가 ≤ 선 + 0.5 ATR · 오늘 종가 > 선 ·
+    오늘 종가 > 200일 단순평균."""
+    if d is None or len(d) < 210:
+        return None
+    d = d.reset_index(drop=True)
+    o, h, l, c = (d[x].to_numpy(float) for x in ("open", "high", "low", "close"))
+    n = len(c); t = n - 1
+    PH, PL = _diag_pivots(h, k, True), _diag_pivots(l, k, False)
+    if not len(PH) or not len(PL):
+        return None
+    piv = np.r_[PH, PL]; ppx = np.r_[h[PH], l[PL]]
+    o_ = np.argsort(piv, kind="stable"); piv, ppx = piv[o_], ppx[o_]
+    ang = []                                   # (확정 시각, B 위치, 기울기, A 위치, A 저가, 각도 고점 위치)
+    for b in PH:
+        aa = PL[PL < b]
+        if not len(aa):
+            continue
+        a = int(aa[-1]); seg = np.arange(a + 1, b + 1); body = c[seg] - o[seg]
+        if body.max() <= 0:
+            continue
+        bb = int(seg[np.argmax(body)])
+        if bb <= a:
+            continue
+        s = (h[bb] - l[a]) / (bb - a)
+        if s <= 0:
+            continue
+        ang.append((int(b) + k, int(b), float(s), a, float(l[a]), bb))
+    if not ang:
+        return None
+    cts = np.array([x[0] for x in ang])
+    ai = int(np.searchsorted(cts, t, side="right") - 1); ai_prev = int(np.searchsorted(cts, t - 1, side="right") - 1)
+    if ai < 0 or ai_prev != ai:
+        return None
+    _, b0, s, a_idx, a_px, bb = ang[ai]
+    lo = int(np.searchsorted(piv, b0)); hi = int(np.searchsorted(piv, t - k, side="right"))
+    if hi <= lo:
+        return None
+    sel = np.arange(max(lo, hi - m_copies), hi)[::-1]
+    pp, px = piv[sel], ppx[sel]
+    V = px + s * (t - pp); VP = px + s * (t - 1 - pp); okp = pp + k <= t - 1
+    a_d = float(_atr_array(h, l, c)[t]); sma200 = float(np.mean(c[t - 199:t + 1]))
+    if not np.isfinite(a_d) or a_d <= 0 or not c[t] > sma200:
+        return None
+    q = okp & (c[t - 1] > VP) & (l[t] <= V + DIAG_ZONE_ATR * a_d) & (c[t] > V)
+    if not q.any():
+        return None
+    j = int(np.argmin(np.where(q, np.abs(V - c[t]), np.inf)))
+    return {"line": float(V[j]), "slope": float(s), "atr_d": a_d, "sma200": sma200, "pivot_idx": int(pp[j]),
+            "pivot_ts": d["ts"].iloc[int(pp[j])], "A_ts": d["ts"].iloc[a_idx], "A_px": a_px,
+            "B_ts": d["ts"].iloc[bb], "B_px": float(h[bb]), "day": d["ts"].iloc[t], "close_d": float(c[t])}
+
+
+def closed_daily(exchange_id: str, symbol: str) -> Optional[pd.DataFrame]:
+    """마감된 일봉(UTC 00시 기준). 하루 한 번만 거래소에서 받고 나머지는 저장해 둔 것을 씀."""
+    key = (exchange_id, symbol); today = utc_now().floor("1D")
+    got = _DAILY_CACHE.get(key)
+    if got and got[0] == today:
+        return got[1]
+    d = drop_unclosed(fetch_ohlcv(exchange_id, symbol, timeframe="1d", limit=DIAG_DAILY_LIMIT), "1d")
+    if d is not None and len(d) and not (pd.to_datetime(d["ts"]).dt.hour == 0).all():
+        print(f"[warn] {symbol} 일봉이 UTC 00시 기준이 아니라 빗각 계산에서 제외")
+        d = None
+    if utc_now() - today >= pd.Timedelta(minutes=5):    # 마감 직후 몇 분은 거래소 반영 전일 수 있어 저장하지 않음
+        _DAILY_CACHE[key] = (today, d)
+    return d
+
+
+def btc_phase_on(exchange_id: str, day) -> Optional[int]:
+    """마감된 BTC 일봉 기준 그날의 국면 번호(0 대상승 · 1 상승·횡보 · 2 하락·횡보 · 3 대하락). 모르면 None.
+    연구 코드 regime5.regime_daily와 같은 계산: 일봉 d의 국면 = d일 종가(다음 날 UTC 00시)까지의 정보."""
+    for ex_id in [exchange_id] + [e for e in EXCHANGES if e != exchange_id]:
+        try:
+            d = closed_daily(ex_id, f"BTC/{QUOTE}")
+        except Exception:
+            d = None
+        if d is None or len(d) < 260:
+            continue
+        b = d.set_index("ts")["close"].astype(float).sort_index()
+        sma = b.rolling(200, min_periods=200).mean(); r60 = b / b.shift(60) - 1
+        lab = pd.Series(np.where(b > sma, np.where(r60 >= 0.20, 0, 1), np.where(r60 <= -0.20, 3, 2)), index=b.index)[sma.notna()]
+        v = lab.get(pd.Timestamp(day))
+        return None if v is None else int(v)
+    return None
+
+
+def build_diag_setup(symbol: str, exchange_id: str, df: pd.DataFrame, btc_df: pd.DataFrame, price: float,
+                     alt_df: Optional[pd.DataFrame] = None) -> Optional["CoinSetup"]:
+    """🧪 빗각 지지 롱. 일봉 신호는 한국 09시(UTC 00시) 마감 → 진입 기준 = 그 마감 4시간봉(UTC 20시 시작) 종가.
+    다음 일봉 마감 전까지는 같은 신호를 보여줌(5년 검증: 13·17·21시에 늦게 들어가도 거래당 성과 거의 같음)."""
+    d = closed_daily(exchange_id, symbol)
+    if d is None or len(d) < 210:
+        return None
+    sig = diag_support_signal(d)
+    if not sig:
+        return None
+    if DIAG_BULL_ONLY and btc_phase_on(exchange_id, sig["day"]) != 0:     # v31.1 사용자 결정: 대상승일 때만
+        _rej("phase_gate")
+        return None
+    bar_ts = pd.Timestamp(sig["day"]) + pd.Timedelta(hours=20)       # 이 일봉 마감과 같이 끝나는 4시간봉
+    df_ = df.reset_index(drop=True)
+    hit = df_.index[df_["ts"] == bar_ts]
+    if not len(hit) or TIMEFRAME != "4h":
+        _rej("data_short")
+        return None
+    i = int(hit[0])
+    h4, l4, c4 = (df_[x].to_numpy(float) for x in ("high", "low", "close"))
+    a4 = float(_atr_array(h4, l4, c4)[i]); e = float(c4[i])
+    if not np.isfinite(a4) or a4 <= 0:
+        _rej("data_short")
+        return None
+    sl = e - DIAG_STOP_ATR_D * sig["atr_d"]
+    if sl <= 0 or e - sl < 0.3 * a4:
+        _rej("data_short")
+        return None
+    tp1 = e + DIAG_TP_R * (e - sl)
+    if price <= sl or price >= tp1:
+        _rej("invalid_price" if price <= sl else "target_reached")
+        return None
+    rs = relative_strength_vs_btc(df_.iloc[:i + 1], btc_df)
+    rs_alt = relative_strength_vs_btc(df_.iloc[:i + 1], alt_df) if alt_df is not None else None
+    note = (f"상승 빗각 지지(일봉): 저점 {pd.Timestamp(sig['A_ts']):%y-%m-%d} {fmt_range(sig['A_px'])} → "
+            f"큰 양봉 고가 {pd.Timestamp(sig['B_ts']):%y-%m-%d} {fmt_range(sig['B_px'])} 각도를 "
+            f"{pd.Timestamp(sig['pivot_ts']):%y-%m-%d} 꼭짓점에 복사한 선 {fmt_range(sig['line'])}에 닿고 위에서 마감 · "
+            f"200일선 {fmt_range(sig['sma200'])} 위{' · BTC 대상승 국면' if DIAG_BULL_ONLY else ''} · 손절 = 진입가 − 2 일봉 ATR")
+    x = CoinSetup(symbol, exchange_id, "diag_long", note + " · 한국 09시 일봉 마감 시장가 진입", e, price, tp1, tp1 + (tp1 - e), sl,
+                  (tp1 - e) / (e - sl), False, False, rs, None, atr=a4, live_status="ready", rs_alt=rs_alt)
+    x.level, x.market_entry, x.signal_ts = sig["line"], True, str(bar_ts)
+    set_exit_rule(x, "빗각 지지")
+    return x
+
+
+
+# --------------------------------------------------------------------------
+# v32 🧪 아래꼬리 연속 롱 (일봉) — 연구 코드 wx_lib(꼬리 ≥ 0.5 ATR, 같은 방향 2연속, 완성 봉 진입, BTC200위 + EMA20같은쪽)와 같은 계산
+# --------------------------------------------------------------------------
+def wick_support_signal(d: pd.DataFrame) -> Optional[Dict]:
+    """마감된 일봉(UTC 00시 기준) 마지막 봉이 '아래꼬리 정확히 2연속째'면 정보를, 아니면 None.
+    아래꼬리 봉: 아래꼬리(min(시가,종가) − 저가) ≥ 0.5 × 그 봉의 일봉 ATR(14) · 아래꼬리 > 위꼬리 · 고가 > 저가.
+    신호: 오늘·어제 아래꼬리 봉, 그저께는 아님(3연속째는 신호 아님) · 오늘 종가 > EMA20(일봉 종가)."""
+    if d is None or len(d) < 81:
+        return None
+    d = d.reset_index(drop=True)
+    o, h, l, c = (d[x].to_numpy(float) for x in ("open", "high", "low", "close"))
+    n = len(c); t = n - 1
+    a = _atr_array(h, l, c)
+    lw = np.fmin(o, c) - l; uw = h - np.fmax(o, c); rg = h - l
+    with np.errstate(invalid="ignore"):
+        L = (lw >= WICK_ATR * a) & (lw > uw) & (rg > 0) & np.isfinite(a)
+    if not (L[t] and L[t - 1] and not L[t - 2]):
+        return None
+    ema20 = float(pd.Series(c).ewm(span=20, adjust=False, min_periods=20).mean().iloc[t])
+    a_d = float(a[t])
+    if not np.isfinite(a_d) or a_d <= 0 or not np.isfinite(ema20):
+        return None
+    return {"atr_d": a_d, "ema20": ema20, "ema_ok": bool(c[t] > ema20), "low2": float(min(l[t], l[t - 1])),
+            "wick1": float(lw[t - 1]), "wick2": float(lw[t]), "day": d["ts"].iloc[t], "close_d": float(c[t])}
+
+
+def build_wick_setup(symbol: str, exchange_id: str, df: pd.DataFrame, btc_df: pd.DataFrame, price: float,
+                     alt_df: Optional[pd.DataFrame] = None) -> Optional["CoinSetup"]:
+    """🧪 아래꼬리 연속 롱. 일봉 신호는 한국 09시(UTC 00시) 마감 → 진입 기준 = 그 마감 4시간봉(UTC 20시 시작) 종가.
+    다음 일봉 마감 전까지는 같은 신호를 보여줌(5년 검증: 13·17·21시에 늦게 들어가도 거래당 +0.70·+0.63·+0.62R, 09시 +0.71R)."""
+    d = closed_daily(exchange_id, symbol)
+    if d is None or len(d) < 81:
+        return None
+    sig = wick_support_signal(d)
+    if not sig:
+        return None
+    ph = btc_phase_on(exchange_id, sig["day"])
+    if not sig["ema_ok"] or ph is None or ph not in (0, 1):            # BTC 200일선 위(대상승·상승·횡보) + 코인 EMA20 위
+        _rej("wick_gate")
+        return None
+    bar_ts = pd.Timestamp(sig["day"]) + pd.Timedelta(hours=20)       # 이 일봉 마감과 같이 끝나는 4시간봉
+    df_ = df.reset_index(drop=True)
+    hit = df_.index[df_["ts"] == bar_ts]
+    if not len(hit) or TIMEFRAME != "4h":
+        _rej("data_short")
+        return None
+    i = int(hit[0])
+    h4, l4, c4 = (df_[x].to_numpy(float) for x in ("high", "low", "close"))
+    a4 = float(_atr_array(h4, l4, c4)[i]); e = float(c4[i])
+    if not np.isfinite(a4) or a4 <= 0:
+        _rej("data_short")
+        return None
+    sl = e - WICK_STOP_ATR_D * sig["atr_d"]
+    if sl <= 0 or e - sl < 0.3 * a4:
+        _rej("data_short")
+        return None
+    tp1 = e + WICK_TP_R * (e - sl)
+    if price <= sl or price >= tp1:
+        _rej("invalid_price" if price <= sl else "target_reached")
+        return None
+    rs = relative_strength_vs_btc(df_.iloc[:i + 1], btc_df)
+    rs_alt = relative_strength_vs_btc(df_.iloc[:i + 1], alt_df) if alt_df is not None else None
+    note = (f"일봉 아래꼬리 2연속(어제 {fmt_range(sig['wick1'])} · 오늘 {fmt_range(sig['wick2'])}, 기준 0.5 일봉 ATR = "
+            f"{fmt_range(WICK_ATR * sig['atr_d'])}) · 두 봉 최저가 {fmt_range(sig['low2'])} · BTC 200일선 위 · "
+            f"EMA20 {fmt_range(sig['ema20'])} 위 마감 · 손절 = 진입가 − 2 일봉 ATR")
+    x = CoinSetup(symbol, exchange_id, "wick_long", note + " · 한국 09시 일봉 마감 시장가 진입", e, price, tp1, tp1 + (tp1 - e), sl,
+                  (tp1 - e) / (e - sl), False, False, rs, None, atr=a4, live_status="ready", rs_alt=rs_alt)
+    x.level, x.market_entry, x.signal_ts = sig["low2"], True, str(bar_ts)
+    set_exit_rule(x, "아래꼬리 연속")
+    return x
+
 def build_setup(symbol: str, exchange_id: str, df: pd.DataFrame, btc_df: pd.DataFrame,
                 regime: RegimeType, htf_trend: RegimeType = "sideways",
                 current_price: Optional[float] = None,
@@ -2739,9 +2998,28 @@ def refresh_watch_prices(items: List[Dict]) -> None:
         w["crossing"] = p > w["trigger"] if w["side"] == "long" else p < w["trigger"]
 
 
+def entry_kst(setup: "CoinSetup") -> pd.Timestamp:
+    """진입 기준 시각(한국): 신호 봉 마감. 신호 시각이 없으면 지금."""
+    try:
+        if getattr(setup, "signal_ts", None):
+            return pd.Timestamp(setup.signal_ts) + pd.Timedelta(TIMEFRAME) + pd.Timedelta(hours=9)
+    except Exception:
+        pass
+    return utc_now() + pd.Timedelta(hours=9)
+
+
+def calendar_risk_mult(setup: "CoinSetup") -> float:
+    """v32.1: 지금 3종의 일요일(한국) 진입은 위험 ½ — 5년 검증에서 일요일 진입만 3자료·두 사이클 모두 손해(손절 72~76%)."""
+    if not SUNDAY_HALF or SETUP_FAMILY.get(getattr(setup, "bias", ""), "") not in SUNDAY_HALF_FAMILIES:
+        return 1.0
+    return SUNDAY_RISK_MULT if entry_kst(setup).weekday() == 6 else 1.0
+
+
 def live_status_of(setup: "CoinSetup", price: float) -> str:
     """현재가 기준 상태. 손절선을 먼저 넘으면 무효, 목표1에 먼저 닿으면 놓침."""
     tol = CHASE_ATR * setup.atr if setup.atr else setup.entry_price * 0.005
+    if setup.bias.startswith(("diag_", "wick_")):   # v31·v32: 일봉 신호 — 13·17·21시 늦은 진입도 검증에서 거의 같아 '추격' 표시 안 함
+        tol = float("inf")
     if setup.bias in LONG_BIASES:
         if price <= setup.sl:
             return "invalid"
@@ -2909,6 +3187,14 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
                 x_ = build_divergence_setup(symbol, exchange_id, df, btc_df, live, alt_al)
                 if x_:
                     extra.append(x_)
+            if "빗각 지지" in ENABLED_FAMILIES:          # v31 🧪 일봉 신호(하루 한 번 일봉을 받아 저장)
+                x_ = build_diag_setup(symbol, exchange_id, df, btc_df, live, alt_al)
+                if x_:
+                    extra.append(x_)
+            if "아래꼬리 연속" in ENABLED_FAMILIES:      # v32 🧪 일봉 신호
+                x_ = build_wick_setup(symbol, exchange_id, df, btc_df, live, alt_al)
+                if x_:
+                    extra.append(x_)
             if not setup and coin_regime == "sideways" and "돌파" in ENABLED_FAMILIES:
                 wc = watch_candidate(df, htf_trend or "sideways", live)
                 if wc:
@@ -2951,7 +3237,7 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
                     print(f"[skip] {symbol}: 펀딩비 과열 방향이라 제외 ({setup.bias})")
                     continue
 
-                setup.signal_ts = str(df["ts"].iloc[-1])
+                setup.signal_ts = setup.signal_ts or str(df["ts"].iloc[-1])   # v31: 일봉 신호는 그 일봉 마감 봉
                 setup.bitget_perp = True if perps else None
                 setup.perp_symbol, setup.perp_mult = info.get("perp", ""), int(info.get("mult", 1))
                 setup.group = grp
@@ -2971,14 +3257,14 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
     passed = []
     for x in setups:
         _CUR_SYM["sym"] = x.symbol
-        if SETUP_FAMILY.get(x.bias) in ("신고점 돌파", "추적선 전환", "돌파 후 되돌림", "위치 다이버전스", "추세 눌림목") or \
+        if SETUP_FAMILY.get(x.bias) in ("신고점 돌파", "추적선 전환", "돌파 후 되돌림", "위치 다이버전스", "추세 눌림목", "빗각 지지", "아래꼬리 연속") or \
                 x.rr_ratio >= (1.3 if (x.poc_confluence or x.sweep_confluence) else 1.5):
             apply_breakout_entry(x)
             cap_ = x.rr_cap if x.rr_cap is not None else x.rr_ratio
             if x.bias.startswith("wait_breakout") and cap_ >= BOX_RR_MAX:
                 _rej("rr_too_far")
                 continue
-            x.market_entry = x.bias.startswith(("donchian", "retest_", "div_", "pb_")) or "즉시 진입" in x.entry_note
+            x.market_entry = x.bias.startswith(("donchian", "retest_", "div_", "pb_", "diag_", "wick_")) or "즉시 진입" in x.entry_note
             passed.append(x)
         else:
             _rej("low_rr")
@@ -3499,7 +3785,8 @@ def tracking_summary(tracks: List[Dict], ref: Optional[Dict] = None) -> tuple:
         h = health.get(fam, {})
         row["자동 방어"] = HEALTH_LABEL.get(h.get("state", "unknown"), "-")
         if fam in TRIAL_FAMILIES:
-            row["단계"] = "✅ 승격(정상 리스크)" if family_promoted(tracks, ref, fam) else f"🧪 시험 운용(리스크 ¼, {len(closed)}/30건)"
+            up_ = (f"✅ 승격(위험 {TRIAL_PROMOTED_RISK[fam]:g}배)" if fam in TRIAL_PROMOTED_RISK else "✅ 승격(정상 리스크)")
+            row["단계"] = up_ if family_promoted(tracks, ref, fam) else f"🧪 시험 운용(리스크 ¼, {len(closed)}/30건)"
         elif fam in FIXED_FAMILY_RISK:
             row["단계"] = f"📉 위험 {FIXED_FAMILY_RISK[fam]:g}배 고정(5년 검증)"
         elif fam in NEW_FAMILY_RISK:
@@ -3556,6 +3843,8 @@ def load_lab_reference() -> Optional[Dict]:
 
 
 def _family_ref(ref: Optional[Dict], fam: str):
+    if fam in STATIC_FAMILY_REF and not (ref or {}).get(fam):   # v31: 연구실이 계산하지 않는 유형은 5년 검증 기준선
+        return STATIC_FAMILY_REF[fam]
     if not ref:
         return None
     key = {"돌파": "base", "신고점 돌파": "donchian",
@@ -3676,12 +3965,19 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         if fam in TRIAL_FAMILIES and not promoted.get(fam):
             x.trial = True
             x.risk_mult *= TRIAL_RISK_MULT
+        elif fam in TRIAL_FAMILIES and fam in TRIAL_PROMOTED_RISK:   # v31: 승격해도 검증한 비중(0.5배)까지만
+            x.fixed_risk = TRIAL_PROMOTED_RISK[fam]
+            x.risk_mult *= TRIAL_PROMOTED_RISK[fam]
         if fam in FIXED_FAMILY_RISK:                           # v30.3: 승격 없는 고정 비중
             x.fixed_risk = FIXED_FAMILY_RISK[fam]
             x.risk_mult *= FIXED_FAMILY_RISK[fam]
         elif fam in NEW_FAMILY_RISK and not promoted.get(fam):   # v27 새 매매법: 실전 30건 확인 전까지 위험 절반
             x.half_start = True
             x.risk_mult *= NEW_FAMILY_RISK[fam]
+        cm_ = calendar_risk_mult(x)                            # v32.1: 일요일 진입 위험 ½(사용자 결정)
+        if cm_ != 1.0:
+            x.sunday_half = True
+            x.risk_mult *= cm_
     active = [x for x in all_setups if x.health != "paused"]
     paused = [x for x in all_setups if x.health == "paused"]
     setups = cap_correlated_exposure(active, risk_cfg) if active else []
@@ -3708,7 +4004,7 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         "버전": APP_VERSION, "봉": TIMEFRAME,
         "기준 봉 마감(한국)": f"{utc_now().floor(TIMEFRAME) + pd.Timedelta(hours=9):%m-%d %H:%M}",
         "코인": f"{stats.get('universe', 0)}개 · {(stats.get('universe_diag') or {}).get('순위 기준', '-')}",
-        "신호 유형": "·".join(f for f in ("돌파", "돌파 후 되돌림", "추세 눌림목", "위치 다이버전스", "신고점 돌파", "추적선 전환")
+        "신호 유형": "·".join(f for f in ("돌파", "돌파 후 되돌림", "추세 눌림목", "빗각 지지", "아래꼬리 연속", "위치 다이버전스", "신고점 돌파", "추적선 전환")
                            if f in ENABLED_FAMILIES),
         "거시 필터": ("켬" if MACRO_FILTER else "끔") + (f"({macro_info['blocked_side']} 제외 중)" if macro_info.get("blocked_side") else ""),
         "자동 방어": ("켬" if AUTO_DEFENSE else "끔") + (f"(중지: {'·'.join(paused_f)})" if paused_f else ""),
@@ -3725,8 +4021,13 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         direction = macro_direction(inputs["btc_df"], bd_, LAST_LOADED, macro_now)
     except Exception as e:
         print(f"[warn] 거시 방향 계산 실패: {e}")
+    event_drift = None
+    try:  # v32.3 FOMC 선반영 참고 (표시용 — 추천 규칙·리스크에는 안 씀)
+        event_drift = fomc_drift_info(inputs["btc_df"], LAST_LOADED)
+    except Exception as e:
+        print(f"[warn] FOMC 참고 계산 실패: {e}")
     return {"regime": regime, "breaker": breaker, "setups": setups, "all_setups": all_setups, "health": health,
-            "direction": direction,
+            "direction": direction, "event_drift": event_drift,
             "trial": {fam: ("승격" if promoted.get(fam) else "시험 운용") for fam in TRIAL_FAMILIES},
             "new_families": {**{fam: ("정상 위험" if promoted.get(fam) else "위험 절반") for fam in NEW_FAMILY_RISK},
                              **{fam: f"위험 {v:g}배 고정" for fam, v in FIXED_FAMILY_RISK.items()}},
@@ -3799,7 +4100,8 @@ SETUP_FAMILY = {"long": "추세", "short": "추세", "wait_breakout_long": "돌�
                 "st_long": "추적선 전환", "st_short": "추적선 전환",
                 "retest_long": "돌파 후 되돌림", "retest_short": "돌파 후 되돌림",
                 "div_long": "위치 다이버전스", "div_short": "위치 다이버전스",
-                "pb_long": "추세 눌림목", "pb_short": "추세 눌림목"}
+                "pb_long": "추세 눌림목", "pb_short": "추세 눌림목", "diag_long": "빗각 지지",
+                "wick_long": "아래꼬리 연속"}
 
 
 def _htf_lookup(df: pd.DataFrame, htf_df: Optional[pd.DataFrame]):
@@ -5678,6 +5980,108 @@ def event_text(e: Dict) -> str:
     return f"{e['label']} {e['time']:%m-%d %H:%M} ({rest})"
 
 
+# --------------------------------------------------------------------------
+# v32.3 FOMC 선반영 참고 문구 (사용자 결정 2026-10-18) — 표시만, 추천·필터·리스크 배수는 바꾸지 않음.
+# 근거: README 'FOMC·CPI·빅테크 실적' 검증. FOMC 40회(2021-11~2026-09), 진입 = 발표 전 마지막 09·13·17·21시,
+# 3일 수익률(그 시각 마감 4시간봉 기준)의 부호와 발표 뒤 24시간 반응. 사전 기준(탐색 전체)은 통과 못 했고
+# 미리 정한 1차 가설(선반영 → 반전)만 확인된 것이라 '참고'로만 보여 줌. CPI·실적엔 이 경향이 없었음.
+# --------------------------------------------------------------------------
+FOMC_DRIFT_PRE_H = 72     # 발표 몇 시간 전부터 화면 상단 참고 문구를 보여 줄지
+FOMC_DRIFT_POST_H = 24    # 발표 몇 시간 뒤까지
+FOMC_DRIFT_REF = {        # 3일 수익률 부호별 발표 뒤 24시간 반응(Binance 선물 4시간봉, 알트 = BTC·ETH 뺀 동일 가중 지수)
+    "n": 40,
+    "alt_up": (11, 14), "alt_dn": (20, 26),      # 오른 채 → 24시간 하락 11/14 · 내린 채 → 24시간 상승 20/26
+    "alt_cyc": "21~23년 16/18 · 24~26년 15/22",
+    "btc_hit": 55, "eth_hit": 60,                # BTC·ETH는 같은 기준 적중률이 낮음(%)
+}
+
+
+def fomc_entry_kst(t0: pd.Timestamp) -> pd.Timestamp:
+    """발표 15분 전까지 마지막 한국 09·13·17·21시(직접 매매 시각) — 검증의 진입 M."""
+    c = (pd.Timestamp(t0) - pd.Timedelta(minutes=15) - pd.Timedelta(hours=9)).floor("4h")   # UTC 마감 시각
+    while c.hour not in (0, 4, 8, 12):
+        c -= pd.Timedelta(hours=4)
+    return c + pd.Timedelta(hours=9)
+
+
+def _ret3_at(df: Optional[pd.DataFrame], close_utc: pd.Timestamp) -> Optional[float]:
+    """close_utc에 마감한 4시간봉 종가 ÷ 72시간 전 종가 − 1."""
+    if df is None or not len(df):
+        return None
+    s = df.set_index("ts")["close"].astype(float)
+    s = s[~s.index.duplicated(keep="last")]
+    a, b = close_utc - pd.Timedelta(hours=4), close_utc - pd.Timedelta(hours=76)
+    if a not in s.index or b not in s.index or not (s[b] > 0):
+        return None
+    return float(s[a] / s[b] - 1)
+
+
+def fomc_drift_info(btc_df: Optional[pd.DataFrame], loaded: Optional[Dict] = None,
+                    now: Optional[pd.Timestamp] = None) -> Optional[Dict]:
+    """다가오는(또는 막 끝난) FOMC의 발표 전 3일 BTC·알트 수익률. 진입 시각(M) 전이면 최근 마감 봉 기준 미리 보기."""
+    now = now or kst_now()
+    ev = None
+    for t, kind in ECON_EVENTS:
+        ts = pd.Timestamp(t)
+        if kind.startswith("FOMC") and ts - pd.Timedelta(hours=FOMC_DRIFT_PRE_H + 4) <= now <= ts + pd.Timedelta(hours=FOMC_DRIFT_POST_H):
+            ev = (ts, kind)
+            break
+    if ev is None or btc_df is None or not len(btc_df):
+        return None
+    m_kst = fomc_entry_kst(ev[0])
+    last_close = pd.Timestamp(btc_df["ts"].iloc[-1]) + pd.Timedelta(hours=4)         # 최근 마감 봉의 마감 시각(UTC)
+    close_utc = min(m_kst - pd.Timedelta(hours=9), last_close)
+    frames = [d for sym, (_, d) in (loaded or {}).items() if sym.split("/")[0] not in ("BTC", "ETH")]
+    alt = build_alt_index(frames) if len(frames) >= 5 else None
+    return {"time": ev[0], "kind": ev[1], "label": EVENT_LABEL.get(ev[1], ev[1]), "m_kst": m_kst,
+            "basis_kst": close_utc + pd.Timedelta(hours=9), "fixed": close_utc >= m_kst - pd.Timedelta(hours=9),
+            "btc": _ret3_at(btc_df, close_utc), "alt": _ret3_at(alt, close_utc), "n_alt": len(frames)}
+
+
+def _fomc_drift_live(d: Optional[Dict], now: Optional[pd.Timestamp] = None, pre_h: float = FOMC_DRIFT_PRE_H) -> bool:
+    if not d or d.get("alt") is None:
+        return False
+    now = now or kst_now()
+    return d["time"] - pd.Timedelta(hours=pre_h) <= now <= d["time"] + pd.Timedelta(hours=FOMC_DRIFT_POST_H)
+
+
+def fomc_drift_text(d: Optional[Dict], now: Optional[pd.Timestamp] = None) -> str:
+    """화면 상단 일정 안내용 참고 문구(발표 3일 전 ~ 발표 뒤 24시간). 표시할 게 없으면 빈 문자열."""
+    if not _fomc_drift_live(d, now):
+        return ""
+    R = FOMC_DRIFT_REF
+    btc = f" · BTC {d['btc'] * 100:+.1f}%" if d.get("btc") is not None else ""
+    basis = (f"{d['m_kst']:%m-%d %H:%M} 마감 봉 기준 확정" if d["fixed"] else
+             f"{d['basis_kst']:%m-%d %H:%M} 마감 봉까지 — 판단 기준은 발표 전 마지막 매매 시각 {d['m_kst']:%m-%d %H:%M}")
+    now = now or kst_now()
+    verb = "맞은" if now >= d["time"] else "맞는"
+    end_ = d["time"] + pd.Timedelta(hours=FOMC_DRIFT_POST_H)
+    side = (f"알트가 {'오른' if d['alt'] > 0 else '내린'} 채 발표를 {verb} 쪽 → 과거엔 발표 뒤 24시간"
+            f"({end_:%m-%d %H:%M}까지) {'되돌림(하락)' if d['alt'] > 0 else '반등'}이 잦았어요")
+    return (f"📐 FOMC 선반영 참고 — {d['label']} {d['time']:%m-%d %H:%M}: 발표 전 3일 알트 {d['alt'] * 100:+.1f}%{btc} "
+            f"({basis}). 지금은 {side}. 5년 FOMC {R['n']}회에서 알트가 3일 오른 채 맞은 {R['alt_up'][1]}회 중 "
+            f"{R['alt_up'][0]}회는 발표 뒤 24시간 내렸고, 내린 채 맞은 {R['alt_dn'][1]}회 중 {R['alt_dn'][0]}회는 올랐어요"
+            f"({R['alt_cyc']}). BTC·ETH는 이 경향이 약하고(같은 기준 {R['btc_hit']}~{R['eth_hit']}%), CPI·빅테크 실적엔 없었어요. "
+            "사전 기준을 다 통과한 규칙이 아니라서 추천·리스크에는 반영하지 않은 참고 표시예요.")
+
+
+def fomc_card_note(d: Optional[Dict], setup, now: Optional[pd.Timestamp] = None) -> str:
+    """추천 카드용 한 줄(발표 EVENT_PRE_H시간 전 ~ 발표 뒤 24시간): 이 신호 방향이 되돌림 경향과 같은지·반대인지."""
+    if setup is None or not _fomc_drift_live(d, now, pre_h=EVENT_PRE_H):
+        return ""
+    base = str(getattr(setup, "symbol", "")).split("/")[0]
+    if base in ("BTC", "ETH"):
+        return (f"FOMC 참고: BTC·ETH는 발표 전 3일 흐름의 되돌림 경향이 약했어요"
+                f"({FOMC_DRIFT_REF['btc_hit']}~{FOMC_DRIFT_REF['eth_hit']}%) — 추천·리스크는 그대로")
+    up = d["alt"] > 0
+    k, n = FOMC_DRIFT_REF["alt_up"] if up else FOMC_DRIFT_REF["alt_dn"]
+    is_long = getattr(setup, "bias", "") in LONG_BIASES
+    same = (is_long and not up) or (not is_long and up)
+    return (f"FOMC 참고: 발표 전 3일 알트 {d['alt'] * 100:+.1f}% → 과거 이런 때 발표 뒤 24시간 알트 "
+            f"{'하락' if up else '상승'} {n}회 중 {k}회. 이 {'롱' if is_long else '숏'}은 그 경향과 "
+            f"{'같은 방향' if same else '반대 방향'}이에요 — 추천·리스크는 그대로(참고만)")
+
+
 def lab_config_text(cfg: Dict) -> str:
     parts = ["박스 돌파: 봉 마감 직후 시장가"]
     if cfg.get("donchian"):
@@ -5701,7 +6105,7 @@ def apply_lab_config(cfg: Dict, save: bool = True) -> None:
     BREAKOUT_ENTRY = "immediate"   # 예전 설정 파일에 'retest'가 남아 있어도 무시 (검증에서 불리했던 방식)
     TSM_ENABLED = bool(cfg.get("tsm"))
     DONCHIAN_VARIANT = cfg.get("donchian_variant", "atr")
-    TRIAL_FAMILIES = set(cfg.get("trial_families", []))
+    TRIAL_FAMILIES = set(cfg.get("trial_families", [])) | FIXED_TRIAL_FAMILIES
     TSM_TRIAL = bool(cfg.get("tsm_trial"))
     PRIORITY_TAGS = set(cfg.get("priority_tags", []))
     FILTER_TAGS = set(cfg.get("filter_tags", []))

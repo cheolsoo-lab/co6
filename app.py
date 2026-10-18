@@ -33,7 +33,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="▲▲▲▲", page_icon="▲▲▲▲", layout="centered",
+st.set_page_config(page_title="▲", page_icon="▲", layout="centered",
                    initial_sidebar_state="collapsed")
 st.markdown(f"<style>{L.CSS}</style>", unsafe_allow_html=True)
 
@@ -61,8 +61,8 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-15 v30.3"
-st.title("▲▲▲▲ ▲▲▲▲")
+APP_VERSION = "2026-10-18 v32.3"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
+st.title("▲ ▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
 if _engine_ver != APP_VERSION:
@@ -173,15 +173,20 @@ with st.expander("⚙️ 설정"):
     auto_def = st.checkbox("🛡 자동 방어 (실전 성과가 나빠진 신호 유형은 리스크 절반 → 계속 나쁘면 자동 중지)",
                            value=True, key="auto_def")
     _fam_default = {} if "fams" in st.session_state else {
-        "default": ["돌파", "돌파 후 되돌림", "추세 눌림목"]
+        "default": ["돌파", "돌파 후 되돌림", "추세 눌림목", "빗각 지지", "아래꼬리 연속"]
     }
-    fams = st.multiselect("추천할 신호 유형", ["돌파", "돌파 후 되돌림", "추세 눌림목", "위치 다이버전스", "신고점 돌파", "추세", "박스 역매매"],
+    fams = st.multiselect("추천할 신호 유형", ["돌파", "돌파 후 되돌림", "추세 눌림목", "빗각 지지", "아래꼬리 연속", "위치 다이버전스", "신고점 돌파", "추세", "박스 역매매"],
                           key="fams",
-                          help="v29(5년·2021.10~2026.10, 2021-23 ↔ 2024-26 두 사이클 교차 검증)에서 살아남은 3가지가 기본이에요. "
+                          help="v29(5년·2021.10~2026.10, 2021-23 ↔ 2024-26 두 사이클 교차 검증)에서 살아남은 3가지 + 🧪 빗각 지지(v31)·아래꼬리 연속(v32) 시험 운용이 기본이에요. "
                                "박스 돌파: 15일(90봉) 박스·거래량 2배. 돌파 후 되돌림: 품질 박스 돌파 뒤 경계 재확인. "
                                "추세 눌림목: 상승 추세 속 눌림 롱·하락 추세 속 반등 숏(위험 ½ 고정 — 5년 검증에서 계좌 효율이 더 좋았음). "
+                               "빗각 지지: 일봉 큰 파동 각도를 꼭짓점에 평행 복사한 선에 닿고 위에서 마감한 롱(200일선 위, 한국 09시) — "
+                               "거래당 성과는 좋았지만 사전 기준을 다 넘지 못해 위험 ¼ 시험 운용. "
+                               "아래꼬리 연속: 일봉 아래꼬리(0.5 일봉 ATR 이상, 위꼬리보다 김)가 2번째 연속으로 마감 + BTC 200일선 위 + 코인 EMA20 위면 09시 롱 — "
+                               "5년 사전 기준을 모두 통과, 새 매매법이라 위험 ¼로 실전 30건 확인. "
                                "위치 다이버전스는 2021-23 사이클에서 마이너스라 기본에서 뺐어요. "
                                "신고점 돌파·추세·박스 역매매는 근거가 약해요.", **_fam_default)
+    diag_bull = True   # v32.2: 🧪 빗각 지지 'BTC 대상승일 때만'은 항상 켬(사용자 결정 — 사이드바 체크박스 없앰)
     if store["lab_cfg"]:
         st.caption("🧪 연구실 적용 설정: " + cmr.lab_config_text(store["lab_cfg"]))
         if st.button("연구실 설정 초기화"):
@@ -195,7 +200,7 @@ bal_sig = balance if port_overlay else balance * (1 - port_alloc / 100)
 bal_port = balance * port_alloc / 100        # 추세 포트폴리오에 쓰는 금액
 risk_cfg = cmr.RiskConfig(account_balance=bal_sig, risk_per_trade_pct=risk_pct, max_concurrent_setups=max_n,
                           max_total_risk_pct=max_total, open_positions=int(open_pos))
-scan_cfg = (top_n, bitget_only, tf, tuple(sorted(fams)), cmr.lab_config_text(store["lab_cfg"] or {}), auto_def, macro_f)
+scan_cfg = (top_n, bitget_only, tf, tuple(sorted(fams)), cmr.lab_config_text(store["lab_cfg"] or {}), auto_def, macro_f, diag_bull)
 
 
 # ---------------------------------------------------------------- 전략 연구실 화면
@@ -570,6 +575,7 @@ def run_scan(force: bool) -> None:
         cmr.TOP_N_BY_VOLUME = top_n
         cmr.BITGET_ONLY = bitget_only
         cmr.ENABLED_FAMILIES = set(fams)
+        cmr.DIAG_BULL_ONLY = bool(diag_bull)
         cmr.AUTO_DEFENSE = auto_def
         cmr.MACRO_FILTER = macro_f
         cmr.set_timeframe(tf)
@@ -670,9 +676,11 @@ def live_refresh_if_due() -> None:
 
 def render(items: list, slots: int = 10 ** 6) -> None:
     ev = cmr.active_event()
+    drift_ = (store.get("result") or {}).get("event_drift")   # v32.3 FOMC 선반영 참고(표시만)
     for k, s in enumerate(items):
         mult = getattr(s, "risk_mult", 1.0) or 1.0  # 자동 방어 '주의'면 0.5
         s.event_note = cmr.event_text(ev) if ev else ""
+        s.drift_note = cmr.fomc_card_note(drift_, s)
         if ev:
             mult *= cmr.EVENT_RISK_MULT
         rc = dataclasses.replace(risk_cfg, risk_per_trade_pct=risk_pct * mult)
@@ -713,6 +721,9 @@ def recommendations() -> None:
     if ev_:
         st.warning(f"📅 이벤트 위험 시간대: {cmr.event_text(ev_)}. 크게 흔들리는 구간이라 신규 진입 리스크를 절반으로 "
                    "계산했어요. 시장가 진입은 피하고, 보유 포지션의 손절 주문을 확인하세요.")
+    _dt = cmr.fomc_drift_text(r.get("event_drift"))
+    if _dt:
+        st.info(_dt)
     paused = [s for s in r["all_setups"] if getattr(s, "health", "") == "paused"]
     active_all = [s for s in r["all_setups"] if getattr(s, "health", "") != "paused"]
     with contextlib.redirect_stdout(io.StringIO()):
@@ -912,6 +923,7 @@ def render_today() -> None:
     st.markdown(f"### 📅 {now_kst:%m월 %d일} 오늘의 투자")
     st.caption(f"⏱ 박스 돌파·돌파 후 되돌림은 봉 마감 직후(01·05·09·13·17·21시) 바로 시장가로 들어갈 때 가장 좋아요 — "
                f"2시간이 지나면 엣지가 줄고, 4시간이 넘으면 건너뛰세요. 📈 추세 눌림목은 8시간 안이면 늦게 들어가도 괜찮아요 · "
+               f"🧪 빗각 지지·아래꼬리 연속은 09시 일봉 신호라 그날 21시까지 진입 가능 · "
                f"다음 신호 갱신 {kst(cmr.next_candle_close(res_tf))}")
     live_refresh_if_due()
     r = store["result"]
@@ -963,6 +975,9 @@ def render_today() -> None:
     if ev_now:
         st.warning(f"📅 이벤트 위험 시간대: {cmr.event_text(ev_now)} — 발표 {cmr.EVENT_PRE_H}시간 전부터 {cmr.EVENT_POST_H}시간 "
                    "후까지는 크게 흔들려요. 신규 진입 리스크 절반·시장가 진입 자제·손절 주문 확인.")
+    _dt = cmr.fomc_drift_text(r.get("event_drift"))
+    if _dt:
+        st.info(_dt)
     if nxt:
         st.caption("📅 다가오는 경제 일정: " + " · ".join(cmr.event_text(x) for x in nxt))
     if lev > 3:
@@ -1103,8 +1118,21 @@ with st.expander("📖 용어 / 사용법"):
         "- **➕ 추가 진입(선택)**: 4시간봉 종가가 진입가 + 1R(손절폭만큼 유리)을 넘으면 계좌 0.5% 위험만큼 한 번 더. 추가분 손절 = 처음 진입가, "
         "정리는 본 포지션과 같이. 5년 검증 두 사이클 모두 수익↑·낙폭 +4%p.\n"
         "- **🔁 돌파 후 되돌림**: 실전 추적 30건 평균이 플러스가 될 때까지 위험 절반. **📈 추세 눌림목**: 위험 ½ 고정(실전 30건 뒤에도 그대로).\n"
+        "- **🧪 빗각 지지(v31 시험 운용)**: 일봉에서 큰 저점 → 가장 큰 양봉 고가로 각도를 잡고, 그 각도를 이후 주요 꼭짓점 6곳에 평행 복사한 선에 "
+        "닿고 위에서 마감(200일선 위)하면 09시 시장가 롱. 손절 = 진입가 − 2 일봉 ATR, 목표 5R 뒤 1.5 ATR 추적, 최대 30일. 위험 ¼로 시작, "
+        "실전 30건 평균이 플러스면 0.5배로 승격. v31.1: 사용자 결정으로 BTC 대상승 국면일 때만(항상 켬).\n"
+        "- **🧪 아래꼬리 연속(v32 시험 운용)**: 일봉 아래꼬리(시가·종가 중 낮은 값 − 저가)가 그 봉 ATR의 0.5배 이상이고 위꼬리보다 긴 봉이 "
+        "정확히 2번째 연속으로 마감 + BTC 일봉 종가가 200일 평균 위 + 코인 종가가 EMA20 위면 09시 시장가 롱(3번째 연속은 신호 아님). "
+        "손절 = 진입가 − 2 일봉 ATR, 목표 5R 뒤 3 ATR(4시간봉) 추적, 최대 30일. 5년 사전 기준을 모두 통과했지만 새 매매법이라 위험 ¼로 시작, "
+        "실전 30건 평균이 플러스면 0.5배로 승격.\n"
+        "- **🗓 일요일 진입(v32.1)**: 박스 돌파·돌파 후 되돌림·추세 눌림목 신호의 봉이 일요일(한국 시각)에 마감하면 위험 ½로 계산. "
+        "5년 검증에서 일요일 진입만 3자료·두 사이클 모두 거래당 손해(손절 72~76%, 다른 날 56~58%). 사용자 결정으로 적용.\n"
+        "- **📐 FOMC 선반영 참고(v32.3)**: FOMC 발표 3일 전부터 발표 뒤 24시간까지, 발표 전 3일 알트·BTC 수익률과 "
+        "과거 경향을 보여 줘요. 5년 FOMC 40회에서 알트가 3일 오른 채 발표를 맞으면 14회 중 11회 발표 뒤 24시간 내렸고, "
+        "내린 채 맞으면 26회 중 20회 올랐어요(판단 기준 = 발표 전 마지막 09·13·17·21시 마감 봉). BTC·ETH는 약하고 CPI·실적엔 없음. "
+        "사전 기준을 다 통과한 규칙이 아니라 추천·리스크엔 반영하지 않는 참고 표시예요.\n"
         "- **🧭 시장 국면**: BTC 일봉이 200일 평균 위·아래인지와 60일 수익률(±20%)로 나눈 4가지. 5년 검증에서 국면마다 설정을 "
-        "바꾸는 건 효과가 없어 표시만 해요(국면별 과거 성과 참고용).\n"
+        "바꾸는 건 효과가 없어 표시만 해요(국면별 과거 성과 참고용). 예외: 🧪 빗각 지지는 사용자 결정으로 대상승일 때만.\n"
         "- **손익비**: (목표1까지 거리) ÷ (손절까지 거리).\n"
         "- **상태**: ✅ 진입가 근처 / ⏳ 추격 구간(대기) / ❌ 무효(손절선을 먼저 넘음) / ⌛ 놓침(목표1에 먼저 닿음). "
         "가격만 자동 갱신하고, 신호 자체는 봉 마감 때만 새로 계산해요.\n"
