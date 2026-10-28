@@ -27,7 +27,7 @@ import threading
 import math
 import statistics
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Literal
+from typing import List, Dict, Optional, Literal, Tuple
 
 import requests
 import pandas as pd
@@ -42,7 +42,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-10-18 v32.3"            # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-10-28 v32.7"          # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -114,6 +114,16 @@ WICK_STOP_ATR_D, WICK_TP_R = 2.0, 5.0
 SUNDAY_HALF = True
 SUNDAY_HALF_FAMILIES = {"돌파", "돌파 후 되돌림", "추세 눌림목"}
 SUNDAY_RISK_MULT = 0.5
+# v32.6 사용자 결정(2026-10-28): 시장 출렁임 지수(스캔한 코인들의 4시간봉 Choppiness Index 28봉 중앙값)가 52를 넘으면
+#   지금 3종 신규 진입 위험 ½ (키우는 쪽은 없음).
+#   검증(ext_prereg.txt 3부 + 강건성): 사전 기준 CHOP 14봉 0.5·1·1.5배 = 전 신호 5/6 · 수동 6/6, 무작위 섞기 20번 0번.
+#   28봉 '상위 1/3만 ½' = 전 신호 6/6 · 수동 6/6, 같은 낙폭 연수익 평균 +52%p(전 신호)·+21%p(수동), 무작위 섞기 20번 모두 이김.
+#   경계 52 = 5년 3자료 거래 기준 상위 1/3(2021~23 53.1~53.8, 2024~ 51.5~51.9). 결과를 본 뒤 고른 기간이라 사용자 결정으로 적용.
+CHOP_HALF = True
+CHOP_N = 28
+CHOP_LIMIT = 52.0
+CHOP_RISK_MULT = 0.5
+CHOP_FAMILIES = SUNDAY_HALF_FAMILIES
 LONG_BIASES = ("long", "wait_breakout_long", "range_fade_long", "donchian_long", "st_long", "retest_long", "div_long", "pb_long",
                "diag_long", "wick_long")
 # v29 박스 돌파 진입: 직전 90봉(15일) 박스 · 거래량 20봉 평균의 2배 이상 · 경계 밖 1 ATR 이내 마감(멀리 튄 봉은 추격 안 함)
@@ -1294,7 +1304,10 @@ class CoinSetup:
     half_start: bool = False            # v27: 새 매매법 — 위험 절반으로 시작
     fixed_risk: Optional[float] = None  # v30.3: 승격 없이 고정한 위험 비중(추세 눌림목 0.5)
     sunday_half: bool = False           # v32.1: 일요일 진입 — 위험 ½
+    chop_half: bool = False             # v32.6: 시장 출렁임 지수 52 초과 — 위험 ½
+    chop_value: Optional[float] = None  # v32.6: 신호 봉의 시장 출렁임 지수
     already_tracked: str = ""           # v30.2: 같은 코인·방향 추적 기록이 진행 중이면 그 설명
+    opposite_tracked: str = ""          # v32.5: 같은 코인·반대 방향 추적 기록이 진행 중이면 그 설명 (코인당 한 포지션 → 새 추천 건너뜀)
 
 
 _VOL_DIAG: Dict[str, Dict] = {}   # v29.2: 거래소별 현물 목록 상태(진단 표시용)
@@ -3015,6 +3028,63 @@ def calendar_risk_mult(setup: "CoinSetup") -> float:
     return SUNDAY_RISK_MULT if entry_kst(setup).weekday() == 6 else 1.0
 
 
+def chop_index(df: pd.DataFrame, n: int = CHOP_N) -> pd.Series:
+    """Choppiness Index = 100 × log10(n봉 진폭 합 ÷ n봉 최고−최저) ÷ log10(n). 높을수록 출렁임(방향 없음), 낮을수록 추세."""
+    h, l, c = df["high"].astype(float), df["low"].astype(float), df["close"].astype(float)
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    rng = h.rolling(n).max() - l.rolling(n).min()
+    return 100 * np.log10(tr.rolling(n).sum() / rng) / np.log10(n)
+
+
+def market_chop_info(loaded: Dict[str, tuple], n: int = CHOP_N, tail: int = 90) -> Optional[Dict]:
+    """v32.6: 스캔한 코인(BTC 제외)의 봉마다 Choppiness Index 중앙값 → 시장 출렁임 지수. 완성봉만 사용."""
+    cols = {}
+    for sym, got in (loaded or {}).items():
+        try:
+            if sym.startswith("BTC/") or not got:
+                continue
+            df = got[1]
+            if df is None or len(df) < n + 5:
+                continue
+            ts = pd.to_datetime(df["ts"])
+            cols[sym] = pd.Series(chop_index(df, n).to_numpy(), index=ts).iloc[-tail:]
+        except Exception:
+            continue
+    if len(cols) < 10:
+        return None
+    med = pd.DataFrame(cols).median(axis=1, skipna=True).dropna()
+    if med.empty:
+        return None
+    last = float(med.iloc[-1])
+    return {"value": last, "limit": CHOP_LIMIT, "n": n, "coins": len(cols), "ts": str(med.index[-1]),
+            "avg7d": float(med.iloc[-42:].mean()), "on": bool(CHOP_HALF and last > CHOP_LIMIT),
+            "series": {str(k): float(v) for k, v in med.iloc[-60:].items()}}
+
+
+def chop_risk_mult(setup: "CoinSetup", info: Optional[Dict]) -> Tuple[float, Optional[float]]:
+    """v32.6: 신호 봉 시각의 시장 출렁임 지수가 52 초과면 지금 3종 위험 ½. (배수, 그 봉의 지수)"""
+    if not info or not CHOP_HALF:
+        return 1.0, None
+    ser = info.get("series") or {}
+    v = ser.get(str(pd.Timestamp(setup.signal_ts))) if getattr(setup, "signal_ts", "") else None
+    v = float(info["value"]) if v is None else float(v)
+    if SETUP_FAMILY.get(getattr(setup, "bias", ""), "") not in CHOP_FAMILIES:
+        return 1.0, v
+    return (CHOP_RISK_MULT if v > CHOP_LIMIT else 1.0), v
+
+
+def chop_text(info: Optional[Dict]) -> str:
+    """화면 한 줄 설명"""
+    if not info:
+        return ""
+    v, lim = info["value"], info["limit"]
+    lvl = "출렁임 큼" if v > lim else ("추세 쪽(곧게 움직임)" if v < 47.9 else "보통")
+    act = "박스 돌파·되돌림·눌림목 신규 진입 위험 ½ 적용 중" if info.get("on") else "정상 위험"
+    return (f"🌊 시장 출렁임 지수 {v:.1f} ({info['n']}봉 · 코인 {info['coins']}개 중앙값, 최근 7일 평균 {info['avg7d']:.1f}) — "
+            f"{lvl} → {act} (기준 {lim:g} 초과 시 ½)")
+
+
 def live_status_of(setup: "CoinSetup", price: float) -> str:
     """현재가 기준 상태. 손절선을 먼저 넘으면 무효, 목표1에 먼저 닿으면 놓침."""
     tol = CHASE_ATR * setup.atr if setup.atr else setup.entry_price * 0.005
@@ -3337,7 +3407,8 @@ _FILE_LOCK = threading.RLock()
 
 
 def cloud_files() -> List[str]:
-    return [TRACK_FILE, LAB_REF_FILE, LAB_CONFIG_FILE, MACRO_VAL_FILE, TRADE_LOG_FILE, HISTORY_FILE, PORT_LOG_FILE]
+    return [TRACK_FILE, LAB_REF_FILE, LAB_CONFIG_FILE, MACRO_VAL_FILE, TRADE_LOG_FILE, HISTORY_FILE, PORT_LOG_FILE,
+            LT_LOG_FILE]
 
 
 def _check_cloud_config(tok: Optional[str], gid: Optional[str]) -> Optional[str]:
@@ -3432,6 +3503,8 @@ def cloud_restore() -> str:
                 text = _merge_tracks(local, remote)
             elif path == PORT_LOG_FILE and local.strip():
                 text = _merge_port_log(local, remote)
+            elif path == LT_LOG_FILE and local.strip():
+                text = _merge_lt_log(local, remote)
             elif local.strip():
                 CLOUD["hashes"][path] = None          # 이 컴퓨터 파일 유지 → 다음 저장 때 올림
                 continue
@@ -3463,7 +3536,7 @@ def cloud_pull(min_interval: float = 120.0) -> str:
     try:
         files = _gist_files()
         n = 0
-        for path, fn in ((TRACK_FILE, _merge_tracks), (PORT_LOG_FILE, _merge_port_log)):
+        for path, fn in ((TRACK_FILE, _merge_tracks), (PORT_LOG_FILE, _merge_port_log), (LT_LOG_FILE, _merge_lt_log)):
             name = os.path.basename(path)
             remote = files.get(name, "")
             if not remote.strip() or CLOUD["remote_hashes"].get(name) == _sha(remote):
@@ -3517,7 +3590,7 @@ def cloud_sync(force: bool = False, min_interval: float = 60.0) -> str:
     if not changed:
         return "same"
     try:
-        merge_fns = {TRACK_FILE: _merge_tracks, PORT_LOG_FILE: _merge_port_log}
+        merge_fns = {TRACK_FILE: _merge_tracks, PORT_LOG_FILE: _merge_port_log, LT_LOG_FILE: _merge_lt_log}
         if any(p in changed for p in merge_fns):
             gfiles = _gist_files()
             for path, fn in merge_fns.items():
@@ -3586,14 +3659,16 @@ def _save_tracks(tracks: List[Dict]) -> None:
 def track_new_setups(setups: List[CoinSetup], tracks: List[Dict]) -> int:
     """새 추천을 추적 기록에 추가 (같은 신호는 한 번만, 같은 코인·방향이 진행 중이면 추가 안 함)."""
     keys = {t["key"] for t in tracks}
-    active = {(t["symbol"], t["direction"]) for t in tracks if t["status"] in ACTIVE_TRACK}
+    # v32.5: 방향과 상관없이 코인당 한 포지션 (5년 검증·계좌 모의와 같은 규칙). 예전엔 같은 방향만 막아서
+    # 롱 진행 중에 같은 코인 숏 추천이 나오면 둘 다 기록됐음(양방향 동시 보유)
+    active = {t["symbol"] for t in tracks if t["status"] in ACTIVE_TRACK}
     added = 0
     for x in setups:
         if not x.signal_ts:
             continue
         direction = "long" if x.bias in LONG_BIASES else "short"
         key = f"{x.symbol}|{x.bias}|{x.signal_ts}"
-        if key in keys or (x.symbol, direction) in active:
+        if key in keys or x.symbol in active:
             continue
         tracks.append({"key": key, "symbol": x.symbol, "exchange": x.exchange, "bias": x.bias,
                        "family": SETUP_FAMILY.get(x.bias, x.bias), "direction": direction,
@@ -3605,7 +3680,7 @@ def track_new_setups(setups: List[CoinSetup], tracks: List[Dict]) -> int:
                        "frac": x.exit_frac, "trail": x.exit_trail, "hold": x.max_hold,
                        "perp": x.perp_symbol or "", "mult": int(x.perp_mult or 1),
                        "risk_mult": float(getattr(x, "risk_mult", 1.0) or 1.0)})
-        active.add((x.symbol, direction))
+        active.add(x.symbol)
         added += 1
     return added
 
@@ -3652,6 +3727,14 @@ def update_tracks(tracks: List[Dict], loaded: Dict[str, tuple]) -> None:
                 x = tr[0]
                 t.update(status="종료", R=round(x["R"], 3), gross_R=round(x["gross_R"], 3), reason=x["reason"],
                          exit_ts=str(df["ts"].iloc[x["exit_idx"]]))
+                try:  # v32.7 불타기(목표1 0.5배) 결과: 목표1에 닿았으면 추가분 R ≈ 0.5 × (본 거래 R − 목표1까지 R), 처음 위험 기준
+                    long_t = t["direction"] == "long"; ex_ = int(x["exit_idx"])
+                    seg_ = (df["high"] if long_t else df["low"]).to_numpy(float)[idx + 1:ex_ + 1]
+                    tp1_R = abs(float(t["tp1"]) - float(t["entry"])) / abs(float(t["entry"]) - float(t["sl"]))
+                    hit_ = bool(len(seg_) and (((seg_ >= float(t["tp1"])) if long_t else (seg_ <= float(t["tp1"]))).any()))
+                    t.update(pyr_hit=hit_, pyr_R=round(PYRAMID_SIZE * (x["R"] - tp1_R), 3) if hit_ else 0.0)
+                except Exception:
+                    pass
                 t.pop("live", None)
                 continue
             if st_:
@@ -3735,7 +3818,10 @@ def add_recovered_track(sig: Dict) -> str:
     return f"추가했어요 · 상태 {rec['status']}"
 
 
-PYRAMID_TRIGGER_R = 1.0   # 불타기: 4시간봉 종가가 진입가 + 1R(손절폭만큼 유리) 처음 넘을 때 (v29 검증, 선택)
+# v32.7 사용자 결정(2026-10-28): 불타기 = 목표1에 처음 닿을 때 처음 수량의 0.5배 추가, 추가분도 같은 추적 손절로 함께 정리.
+#   검증: 같은 최대 낙폭 연수익 전 신호 6/6 · 수동 6/6(두 번 독립 통과, 거래당 +0.43 → +0.51R). 같은 개수를 무작위 시점에 넣으면 3/6 · 1/6.
+#   예전 '+1R 종가에 0.5% 추가'는 5/6 · 5/6이라 미통과 → 바꿈.
+PYRAMID_SIZE = 0.5
 
 
 def _live_state(st_: Dict, df: pd.DataFrame, t: Dict) -> Dict:
@@ -3755,14 +3841,14 @@ def _live_state(st_: Dict, df: pd.DataFrame, t: Dict) -> Dict:
         best = float(st_["best"])
         stop_now = float(st_["stop"])
         nxt = max(stop_now, best - trail * atr) if long_ else min(stop_now, best + trail * atr)
-    lvl = e + d * PYRAMID_TRIGGER_R * risk
-    after = closes[i0 + 1:last + 1]
-    hit = np.flatnonzero((after - lvl) * d >= 0) if len(after) else np.array([], int)
-    pyr = {"level": lvl, "first_idx": int(i0 + 1 + hit[0]) if len(hit) else None}
+    lvl = float(st_["tp1"])                             # v32.7: 불타기 = 목표1에 처음 닿을 때
+    ext = (df["high"] if long_ else df["low"]).to_numpy(float)[i0 + 1:last + 1]
+    hit = np.flatnonzero((ext - lvl) * d >= 0) if len(ext) else np.array([], int)
+    pyr = {"level": lvl, "size": PYRAMID_SIZE, "first_idx": int(i0 + 1 + hit[0]) if len(hit) else None}
     if pyr["first_idx"] is not None:
         pyr["first_ts"] = str(df["ts"].iloc[pyr["first_idx"]])
-        pyr["now"] = pyr["first_idx"] == last          # 방금 마감한 봉에서 처음 충족 → 지금 추가 가능
-        pyr["add_stop"] = e
+        pyr["now"] = pyr["first_idx"] == last          # 방금 마감한 봉에서 처음 닿음
+        pyr["add_stop"] = max(e, lvl - trail * atr) if long_ else min(e, lvl + trail * atr)
     return {"entry": e, "entry_ts": str(df["ts"].iloc[i0]), "stage": int(st_["stage"]), "stop_now": stop_now,
             "stop_next": nxt, "sl": sl, "tp1": float(st_["tp1"]), "risk": risk, "trail": trail, "atr": atr,
             "held": last - i0, "hmax": hmax, "last_close": float(closes[last]),
@@ -3799,6 +3885,11 @@ def tracking_summary(tracks: List[Dict], ref: Optional[Dict] = None) -> tuple:
     for t in tracks:
         if t["status"] == "종료" and t.get("R") is not None:
             by_grp.setdefault(t.get("group") or coin_group(t["symbol"]), []).append(t["R"])
+    pyr_ = [t for t in tracks if t["status"] == "종료" and "pyr_hit" in t]
+    if pyr_:
+        hits_ = [t for t in pyr_ if t.get("pyr_hit")]
+        notes.append(f"➕ 불타기(목표1 0.5배, v32.7) 실전 계산: 종료 {len(pyr_)}건 중 목표1 도달 {len(hits_)}건 · "
+                     f"추가분 합계 {sum(t.get('pyr_R') or 0 for t in hits_):+.2f}R (처음 위험 기준, 추천대로 모두 넣었다고 가정)")
     if by_grp:
         notes.append("그룹별 종료 거래: " + " · ".join(f"{g} {len(v)}건 평균 {np.mean(v):+.2f}R" for g, v in sorted(by_grp.items())))
     by_tier = {}
@@ -3950,6 +4041,11 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         print(f"[warn] 실전 추적 갱신 실패: {e}")
     ref_ = load_lab_reference()
     promoted = {fam: family_promoted(tracks, ref_, fam) for fam in set(TRIAL_FAMILIES) | set(NEW_FAMILY_RISK)}
+    chop_info = None
+    try:  # v32.6 시장 출렁임 지수(위험 ½ 규칙)
+        chop_info = market_chop_info(LAST_LOADED)
+    except Exception as e:
+        print(f"[warn] 시장 출렁임 계산 실패: {e}")
     # v30.2: 같은 코인·방향 기록이 진행 중이면 새 추천은 추적에 안 들어감(코인당 한 포지션) → 카드에 알려줌
     act_ = {(t["symbol"], t["direction"]): t for t in tracks if t["status"] in ACTIVE_TRACK}
     for x in all_setups:
@@ -3957,6 +4053,11 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         x.already_tracked = (f"{prev['family']} · 신호 봉 마감 "
                              f"{pd.Timestamp(prev['signal_ts']) + pd.Timedelta(TIMEFRAME) + pd.Timedelta(hours=9):%m-%d %H:%M}"
                              if prev and prev["key"] != f"{x.symbol}|{x.bias}|{x.signal_ts}" else "")
+        # v32.5: 반대 방향 기록이 진행 중이면 알려줌 — 검증 규칙(코인당 한 포지션)상 새 추천은 건너뜀
+        opp = act_.get((x.symbol, "short" if x.bias in LONG_BIASES else "long"))
+        x.opposite_tracked = (f"{'롱' if opp['direction'] == 'long' else '숏'} · {opp['family']} · 신호 봉 마감 "
+                              f"{pd.Timestamp(opp['signal_ts']) + pd.Timedelta(TIMEFRAME) + pd.Timedelta(hours=9):%m-%d %H:%M}"
+                              if opp else "")
     for x in all_setups:
         fam = SETUP_FAMILY.get(x.bias, "")
         st_ = health.get(fam, {}).get("state", "")
@@ -3978,6 +4079,11 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         if cm_ != 1.0:
             x.sunday_half = True
             x.risk_mult *= cm_
+        chm_, chv_ = chop_risk_mult(x, chop_info)              # v32.6: 시장 출렁임 52 초과면 위험 ½(사용자 결정)
+        x.chop_value = chv_
+        if chm_ != 1.0:
+            x.chop_half = True
+            x.risk_mult *= chm_
     active = [x for x in all_setups if x.health != "paused"]
     paused = [x for x in all_setups if x.health == "paused"]
     setups = cap_correlated_exposure(active, risk_cfg) if active else []
@@ -4027,7 +4133,7 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
     except Exception as e:
         print(f"[warn] FOMC 참고 계산 실패: {e}")
     return {"regime": regime, "breaker": breaker, "setups": setups, "all_setups": all_setups, "health": health,
-            "direction": direction, "event_drift": event_drift,
+            "direction": direction, "event_drift": event_drift, "market_chop": chop_info,
             "trial": {fam: ("승격" if promoted.get(fam) else "시험 운용") for fam in TRIAL_FAMILIES},
             "new_families": {**{fam: ("정상 위험" if promoted.get(fam) else "위험 절반") for fam in NEW_FAMILY_RISK},
                              **{fam: f"위험 {v:g}배 고정" for fam, v in FIXED_FAMILY_RISK.items()}},
@@ -4821,6 +4927,369 @@ def portfolio_tracking(log: Optional[List[Dict]] = None, slip_pct: float = TSM_S
             "days": days_total, "records": len(log), "missing": max(days_total + 1 - len(log), 0),
             "rebalances": int(n_reb), "gate_days": int(sum(1 for e in log if e.get("gate"))),
             "start": log[0]["date"], "end": log[-1]["date"]}
+
+
+# ==========================================================================
+# v32.4: 장기 후보(그림자 기록) — '월봉 수렴 + 긴 바닥' 코인 명단을 매달 기록하고 이후 성과를 추적
+#  표시·기록만 함. 추천 규칙·위험·순위에는 전혀 쓰지 않음.
+#  2026-10-22 검증: 이 명단 코인에서 나온 앱 4시간봉 신호는 거래당 R이 나머지의 약 2배(사이클 B, 3개 자료 모두)였지만
+#  '매달 같은 수의 코인을 무작위로 골라도' 그만큼 나오는 경우가 5~18%라 우연을 배제하지 못함 → 실전 기록으로 확인.
+# ==========================================================================
+LT_LOG_FILE = "longterm_log.json"
+LT_Q = 1 / 3                  # 월봉 수렴 하위 1/3 + 최고점 이후 주 수 상위 1/3 (스캔 코인 안에서 순위)
+LT_HIST_START = "2020-12-18"  # 연구 자료와 같은 시작일 — 최고점을 이 날 이후(그리고 Bitget 선물 상장 이후)에서 찾음
+LT_RECENT_DAYS = 430          # 매달 새로 받는 일봉 수 (월봉 12개 + 150일선 + 여유)
+LT_CACHE_LAG_DAYS = 400       # 최고점 기록은 400일 전까지만 확정 저장 → 다음 달엔 최근 430일만 받으면 됨
+LT_MA_EXIT = 150              # 참고 계산: 전날 일봉 종가가 150일 평균 위일 때만 들고 있었다면(아래면 쉬고, 다시 위면 다시 보유)
+LT_KEEP_MONTHS = 120
+LT_JUDGE_MONTHS = 12          # 판정(미리 정함): 명단 12개 이상 쌓이면 ① 명단 코인 신호 R > 나머지(명단 쪽 30건 이상)
+LT_JUDGE_MIN_SIG = 30         #   ② 명단 평균(보유)이 전체 평균보다 높은 달이 12달 중 7달 이상 → 둘 다면 '쓸만한 후보'
+LT_JUDGE_WIN = 7
+# 연구 자료(Bitget 선물 일봉 2020-12-18 ~ 2025-08-31)의 코인별 최고가·날짜(현물 단위) — 처음 실행할 때 5년치를 다시 받지 않게
+LT_SEED_UPTO = "2025-08-31"
+LT_ATH_SEED = {
+    "AAVE": (666.233, "2021-05-18"), "ADA": (3.10485, "2021-09-02"), "ALGO": (0.988, "2022-03-31"),
+    "APT": (20.318, "2023-01-26"), "ARB": (2.4057, "2024-01-12"), "ATOM": (44.74, "2021-09-20"),
+    "AVAX": (146.792, "2021-11-21"), "BAT": (0.3839, "2024-03-13"), "BCH": (1639.26, "2021-05-12"),
+    "BNB": (901.23, "2025-08-22"), "BTC": (124539, "2025-08-14"), "CAKE": (4.8346, "2024-03-29"),
+    "CFX": (0.55098, "2024-03-24"), "CKB": (0.03795, "2024-04-10"), "CRV": (6.8103, "2022-01-04"),
+    "DOGE": (0.485, "2024-12-08"), "DOT": (55.114, "2021-11-04"), "DYM": (8.022, "2024-03-12"),
+    "EIGEN": (5.6614, "2024-12-17"), "ERA": (1.9472, "2025-07-17"), "ETH": (4956.31, "2025-08-24"),
+    "ETHFI": (8.692, "2024-03-27"), "FET": (3.4855, "2024-03-28"), "FIL": (237.775, "2021-04-01"),
+    "HBAR": (0.40172, "2025-01-17"), "ICP": (150.03, "2021-05-26"), "INJ": (53.192, "2024-03-14"),
+    "IO": (6.528, "2024-06-12"), "JST": (0.0427, "2025-07-29"), "JTO": (5.335, "2024-04-03"),
+    "JUP": (1.8451, "2024-04-01"), "KAIA": (0.4231, "2024-12-02"), "LDO": (4.0408, "2024-01-11"),
+    "LINK": (52.974, "2021-05-10"), "LTC": (412.98, "2021-05-10"), "LUMIA": (2.593, "2024-12-04"),
+    "MAGIC": (2.3292, "2023-02-16"), "MANTA": (4.089, "2024-03-12"), "MINA": (1.7249, "2024-03-12"),
+    "MUBARAK": (0.1623, "2025-03-27"), "NEAR": (20.619, "2022-01-14"), "NIL": (0.8768, "2025-03-24"),
+    "OGN": (0.2821, "2024-03-12"), "ONDO": (2.1463, "2024-12-16"), "OP": (4.8675, "2024-03-06"),
+    "PAXG": (3525.14, "2025-04-22"), "PENGU": (0.04702, "2025-01-06"), "PEPE": (2.83936e-05, "2024-12-09"),
+    "PLUME": (0.11864, "2025-08-18"), "POL": (0.7685, "2024-12-03"), "PUMP": (0.005314, "2025-07-18"),
+    "PYTH": (1.1475, "2024-03-16"), "QNT": (171.94, "2024-12-07"), "RAY": (8.6909, "2025-01-23"),
+    "RENDER": (11.869, "2024-12-05"), "RVN": (0.06114, "2024-03-31"), "S": (0.9909, "2025-02-21"),
+    "SAND": (6.9595, "2021-12-26"), "SEI": (1.14592, "2024-03-16"), "SOL": (295.642, "2025-01-19"),
+    "STRK": (2.6761, "2024-03-13"), "SUI": (5.3705, "2025-01-06"), "TAO": (745, "2024-12-06"),
+    "TIA": (21.1859, "2024-02-10"), "TRUMP": (90.16, "2025-01-19"), "TRX": (0.45067, "2024-12-04"),
+    "UNI": (45.019, "2021-05-03"), "VIRTUAL": (2.5893, "2025-05-27"), "W": (1.275, "2024-04-04"),
+    "WLD": (11.97, "2024-03-10"), "XAUT": (3530.4, "2025-04-22"), "XLM": (0.79975, "2021-05-16"),
+    "XRP": (3.6655, "2025-07-18"), "ZK": (0.2727, "2024-12-07"), "ZRO": (7.57, "2024-12-06")}
+
+
+def _lt_wk(s: pd.Series) -> pd.Series:
+    """주봉 이름 = 그 주의 일요일 날짜 (pandas W-SUN과 같음, 월요일 00시 UTC에 새 주 시작)"""
+    n = pd.to_datetime(s).dt.normalize()
+    return n + pd.to_timedelta(6 - n.dt.weekday, unit="D")
+
+
+def longterm_features(daily: Dict[str, pd.DataFrame], t, ath: Optional[Dict] = None) -> pd.DataFrame:
+    """월 시작 t 기준(t 전에 끝난 봉만): F1 = 최근 3개월 폭 ÷ 최근 12개월 폭(월봉) — 작을수록 '수렴',
+    F4 = 최고점 이후 지난 주 수(일요일 마감 주봉) — 클수록 '긴 바닥'. 연구 계산(mw2)과 같음.
+    스캔 코인 안에서 백분위를 매겨 F1 하위 1/3 + F4 상위 1/3이 명단. ath = {심볼: (최고가, 날짜)}: 일봉보다 오래된 구간의 최고점.
+    표시용으로 지금 기준 고점 대비·150일선 위/아래·90일 수익률도 함께 계산."""
+    t = pd.Timestamp(t).normalize()
+    last_wk = t - pd.Timedelta(days=1)
+    last_wk = last_wk - pd.Timedelta(days=(last_wk.weekday() + 1) % 7)       # t 전의 마지막 일요일
+    months = pd.date_range(end=t - pd.offsets.MonthBegin(1), periods=12, freq="MS")
+    rows = []
+    for s, d0 in daily.items():
+        if d0 is None or not len(d0):
+            continue
+        d0 = d0.sort_values("ts")
+        d = d0[d0["ts"] < t]
+        if not len(d):
+            continue
+        x = d.set_index("ts")
+        mh = x["high"].resample("MS").max().reindex(months)
+        ml = x["low"].resample("MS").min().reindex(months)
+        den = mh.max() - ml.min()
+        f1 = float((mh.iloc[-3:].max() - ml.iloc[-3:].min()) / den) if pd.notna(den) and den > 0 else np.nan
+        dw = d[_lt_wk(d["ts"]) <= last_wk]
+        hh, hd = np.nan, None
+        if len(dw):
+            i = int(np.argmax(dw["high"].to_numpy()))
+            hh, hd = float(dw["high"].iloc[i]), pd.Timestamp(dw["ts"].iloc[i])
+        a = (ath or {}).get(s)
+        if a and pd.Timestamp(a[1]) <= last_wk and (hd is None or not hh > float(a[0])):
+            hh, hd = float(a[0]), pd.Timestamp(a[1])                           # 같으면 더 오래된 쪽(연구와 같음)
+        f4 = float((last_wk - _lt_wk(pd.Series([hd])).iloc[0]).days // 7) if hd is not None else np.nan
+        c = d0["close"].astype(float)
+        top = max(float(d0["high"].max()), float(a[0]) if a else 0.0)
+        rows.append({"sym": s, "F1": f1, "F4": f4, "close": float(c.iloc[-1]),
+                     "dd": float(c.iloc[-1] / top - 1) if top > 0 else np.nan,
+                     "a150": (bool(c.iloc[-1] > c.iloc[-LT_MA_EXIT:].mean()) if len(c) >= LT_MA_EXIT else None),
+                     "r90": float(c.iloc[-1] / c.iloc[-91] - 1) if len(c) > 90 else np.nan})
+    F = pd.DataFrame(rows)
+    if not len(F):
+        return F
+    F["F1_p"] = F["F1"].rank(pct=True)
+    F["F4_p"] = F["F4"].rank(pct=True)
+    F["sel"] = (F["F1_p"] < LT_Q) & (F["F4_p"] > 1 - LT_Q)
+    return F
+
+
+def _lt_parse(txt: str) -> Dict:
+    try:
+        raw = json.loads(txt) if txt and txt.strip() else {}
+    except Exception:
+        raw = {}
+    raw = raw if isinstance(raw, dict) else {}
+    months = [m for m in raw.get("months") or [] if isinstance(m, dict) and m.get("month")
+              and isinstance(m.get("sel"), list) and isinstance(m.get("p0"), dict)]
+    ath = {k: v for k, v in (raw.get("ath") or {}).items() if isinstance(v, list) and len(v) == 3}
+    return {"months": months, "ath": ath}
+
+
+def load_longterm_log() -> Dict:
+    try:
+        with open(LT_LOG_FILE, encoding="utf-8") as f:
+            v = _lt_parse(f.read())
+    except Exception:
+        v = {"months": [], "ath": {}}
+    v["months"] = sorted(v["months"], key=lambda m: m["month"])
+    return v
+
+
+def _merge_lt_log(local_txt: str, remote_txt: str) -> str:
+    """두 곳의 장기 후보 기록 합치기: 달마다 먼저 만든 명단(처음 본 명단·가격)을 남기고, 최고점 기록은 더 최근까지 확정된 쪽."""
+    a, b = _lt_parse(remote_txt), _lt_parse(local_txt)
+    months: Dict[str, Dict] = {}
+    for m in a["months"] + b["months"]:
+        cur = months.get(m["month"])
+        if cur is None or str(m.get("made_at", "")) < str(cur.get("made_at", "")):
+            months[m["month"]] = m
+    ath = dict(a["ath"])
+    for k, v in b["ath"].items():
+        if k not in ath or str(v[2]) > str(ath[k][2]):
+            ath[k] = v
+    return json.dumps({"months": [months[k] for k in sorted(months)][-LT_KEEP_MONTHS:], "ath": ath}, ensure_ascii=False)
+
+
+def _save_longterm_log(obj: Dict) -> None:
+    try:
+        with _FILE_LOCK:
+            mine = json.dumps(obj, ensure_ascii=False, default=str)
+            cur = open(LT_LOG_FILE, encoding="utf-8").read() if os.path.exists(LT_LOG_FILE) else ""
+            text = _merge_lt_log(mine, cur) if cur.strip() else _merge_lt_log(mine, "")
+            with open(LT_LOG_FILE, "w", encoding="utf-8") as f:
+                f.write(text)
+    except Exception as e:
+        print(f"[warn] 장기 후보 기록 저장 실패: {e}")
+
+
+def longterm_month(now: Optional[pd.Timestamp] = None) -> str:
+    """명단의 달 = 월봉 기준(UTC). 한국 시간으로는 매달 1일 09시에 다음 달로 넘어감."""
+    return (now or utc_now()).strftime("%Y-%m")
+
+
+def longterm_due(now: Optional[pd.Timestamp] = None) -> Optional[str]:
+    """이번 달 명단이 아직 없으면 그 달('2026-10'), 있으면 None."""
+    m = longterm_month(now)
+    return None if any(x["month"] == m for x in load_longterm_log()["months"]) else m
+
+
+def bitget_perp_last_prices() -> Dict[str, float]:
+    """Bitget USDT-M 선물 현재가 {선물 심볼: 가격(선물 표기)}. 실패하면 빈 dict."""
+    try:
+        ex = _get_ex("bitget")
+        ex.load_markets()
+    except Exception as e:
+        print(f"[warn] Bitget 시장 목록 조회 실패: {e}")
+        return {}
+    tk: Dict = {}
+    for params in ({"type": "swap", "productType": "USDT-FUTURES"}, {"productType": "USDT-FUTURES"}):
+        try:
+            tk = ex.fetch_tickers(None, params) or {}
+            if tk:
+                break
+        except Exception as e:
+            print(f"[warn] Bitget 선물 시세 조회 실패: {e}")
+    out: Dict[str, float] = {}
+    for s, v in tk.items():
+        p = s if ":" in s else f"{s}:{QUOTE}"
+        try:
+            px = float((v or {}).get("last") or (v or {}).get("close") or 0)
+        except Exception:
+            px = 0.0
+        if px > 0 and p.endswith(f"/{QUOTE}:{QUOTE}"):
+            out[p] = px
+    return out
+
+
+def longterm_scan(top_n: Optional[int] = None, progress_cb=None, now: Optional[pd.Timestamp] = None) -> Dict:
+    """이번 달 장기 후보 명단 만들기 (스캔 코인 전체 일봉 → 월봉·주봉). 기록은 record_longterm()이 함.
+    코인당 최근 430일 일봉 1번(처음 보는 코인만 2020-12부터 전체) — 100개 코인이면 몇 분 걸릴 수 있어 앱에서는 뒤에서 돌림."""
+    now = now or utc_now()
+    t = now.normalize().replace(day=1)
+    saved = (dict(UNIVERSE_DIAG), dict(_VOL_DIAG))      # 뒤에서 돌 때 화면의 '코인 목록 진단'을 덮어쓰지 않게
+    try:
+        perps = bitget_perp_symbols()
+        uni = build_universe(top_n or TOP_N_BY_VOLUME, perps or None)
+    finally:
+        UNIVERSE_DIAG.clear()
+        UNIVERSE_DIAG.update(saved[0])
+        _VOL_DIAG.clear()
+        _VOL_DIAG.update(saved[1])
+    if not uni:
+        raise RuntimeError("스캔할 코인 목록을 받지 못했어요.")
+    cache = dict(load_longterm_log()["ath"])
+    new_upto = (now - pd.Timedelta(days=LT_CACHE_LAG_DAYS)).normalize()
+    daily, ath_in, errs = {}, {}, []
+    items = list(uni.items())
+    for k, (sym, info) in enumerate(items):
+        if progress_cb:
+            progress_cb(k, len(items), sym.split("/")[0])
+        base = sym.split("/")[0]
+        c = cache.get(base)
+        if c:
+            a, upto = (float(c[0]), str(c[1])), pd.Timestamp(c[2])
+        elif base in LT_ATH_SEED:
+            a, upto = LT_ATH_SEED[base], pd.Timestamp(LT_SEED_UPTO)
+        else:
+            a, upto = None, None
+        days = (max(LT_RECENT_DAYS, (now - upto).days + 10) if upto is not None
+                else (now - pd.Timestamp(LT_HIST_START)).days + 2)
+        try:
+            d = drop_unclosed(fetch_ohlcv(info.get("src") or "bitget", sym, "1d", days), "1d")
+        except Exception:
+            d = None
+        if d is None or len(d) < 2:
+            errs.append(base)
+            continue
+        d = d[["ts", "high", "low", "close"]].copy()
+        d[["high", "low", "close"]] = d[["high", "low", "close"]].astype(float)
+        daily[sym] = d
+        if a:
+            ath_in[sym] = a
+        old = d[d["ts"] <= new_upto]                    # 다음 달부터 다시 안 받을 구간의 최고점 확정
+        if upto is not None:
+            old = old[old["ts"] > upto]
+        h, hd = (float(a[0]), str(a[1])) if a else (None, None)
+        if len(old):
+            i = int(np.argmax(old["high"].to_numpy()))
+            if h is None or float(old["high"].iloc[i]) > h:
+                h, hd = float(old["high"].iloc[i]), str(pd.Timestamp(old["ts"].iloc[i]).date())
+        if h is not None and (upto is None or new_upto > upto):
+            cache[base] = [float(f"{h:.6g}"), hd, str(new_upto.date())]
+    if progress_cb:
+        progress_cb(len(items), len(items), "계산")
+    F = longterm_features(daily, t, ath_in)
+    if not len(F):
+        raise RuntimeError("일봉을 받은 코인이 없어요.")
+    px = bitget_perp_last_prices()
+    p0: Dict[str, float] = {}
+    sel = []
+    for r_ in F.sort_values("F1").to_dict("records"):
+        info = uni.get(r_["sym"]) or {}
+        perp, mult = info.get("perp") or r_["sym"], int(info.get("mult") or 1)
+        p = px.get(perp) or r_["close"] * mult              # 시세 조회 실패 → 어제 일봉 종가(선물 표기)
+        p0[perp] = float(f"{p:.8g}")
+        if r_["sel"]:
+            sel.append({"s": r_["sym"], "perp": perp, "m": mult, "f1": round(r_["F1"], 4), "wk": int(r_["F4"]),
+                        "dd": round(r_["dd"], 4) if pd.notna(r_["dd"]) else None, "a150": r_["a150"],
+                        "r90": round(r_["r90"], 4) if pd.notna(r_["r90"]) else None})
+    rec = {"month": t.strftime("%Y-%m"), "t": str(t.date()), "made_at": str(now), "v": APP_VERSION, "q": round(LT_Q, 4),
+           "n": int(len(F)), "sel": sel, "p0": p0, "price_src": "선물 현재가" if px else "어제 일봉 종가", "err": errs[:30]}
+    return {"rec": rec, "ath": cache}
+
+
+def record_longterm(res: Dict) -> bool:
+    """명단 기록(달마다 1번, 처음 만든 것) + 최고점 기록 저장. 새로 기록했으면 True."""
+    if not res or not res.get("rec"):
+        return False
+    log = load_longterm_log()
+    new = not any(m["month"] == res["rec"]["month"] for m in log["months"])
+    _save_longterm_log({"months": log["months"] + ([res["rec"]] if new else []), "ath": res.get("ath") or log["ath"]})
+    return new
+
+
+def _lt_ma_hold(d: pd.DataFrame, made: pd.Timestamp) -> Optional[tuple]:
+    """기록한 날부터 '전날 종가가 150일 평균 위인 날만 보유'했다면의 수익(일봉 종가 기준)과 지금 보유 상태.
+    (명단 코인은 바닥권이라 기록 때 150일선 아래인 경우가 많아 '아래로 내려가면 정리' 한 번으로는 의미가 없음)"""
+    c = d.drop_duplicates("ts").set_index("ts")["close"].astype(float).sort_index()
+    if len(c) < 2:
+        return None
+    ma = c.rolling(LT_MA_EXIT, min_periods=LT_MA_EXIT).mean()
+    on = (c > ma).shift(1, fill_value=False).astype(bool)
+    m = c.index >= made.normalize()
+    r = c.pct_change().fillna(0.0)
+    ret = float(np.prod(1 + r[m].to_numpy() * on[m].to_numpy()) - 1)
+    return ret, (bool(c.iloc[-1] > ma.iloc[-1]) if pd.notna(ma.iloc[-1]) else None)
+
+
+def longterm_tracking(log: Optional[Dict] = None, tracks: Optional[List[Dict]] = None,
+                      prices: Optional[Dict[str, float]] = None, daily: Optional[Dict[str, pd.DataFrame]] = None,
+                      max_months: int = 12) -> Optional[Dict]:
+    """기록된 명단의 이후 성과: ① 명단 코인을 기록 시점 가격에 사서 들고 있었다면(같은 비중) vs 스캔 코인 전체 평균
+    ② 150일선 위에서만 들고 있었다면 ③ 기록 뒤 그 달에 앱이 낸 신호(실전 추적, 끝난 것)의 거래당 R — 명단 코인 vs 나머지.
+    수수료·펀딩은 빼지 않은 단순 가격 수익(비교용)."""
+    log = load_longterm_log() if log is None else log
+    months = log["months"][-max_months:]
+    if not months:
+        return None
+    px = bitget_perp_last_prices() if prices is None else prices
+    tracks = load_tracks() if tracks is None else tracks
+    if daily is None:                                   # 150일선 계산용 일봉 (명단 코인만)
+        need: Dict[str, int] = {}
+        for m in months:
+            for x in m["sel"]:
+                need[x["s"]] = max(need.get(x["s"], 0), (utc_now() - pd.Timestamp(m["made_at"])).days + LT_MA_EXIT + 15)
+        daily = {}
+        for s, days in need.items():
+            try:
+                d = drop_unclosed(fetch_ohlcv("bitget", s, "1d", days), "1d")
+                if d is not None and len(d):
+                    daily[s] = d[["ts", "close"]].copy()
+            except Exception:
+                pass
+    done = [t for t in tracks if t.get("status") == "종료" and t.get("R") is not None]
+    rows, detail, all_in, all_out = [], [], [], []
+    for k, m in enumerate(months):
+        made = pd.Timestamp(m["made_at"])
+        end = pd.Timestamp(m["t"]) + pd.offsets.MonthBegin(1)
+        names = {x["s"] for x in m["sel"]}
+        ret = lambda perp: (px[perp] / m["p0"][perp] - 1) if px.get(perp) and m["p0"].get(perp) else None
+        uni_r = [v for v in (ret(p) for p in m["p0"]) if v is not None]
+        hold, mae = [], []
+        for x in m["sel"]:
+            r_ = ret(x["perp"])
+            if r_ is None:
+                continue
+            hold.append(r_)
+            mh_ = _lt_ma_hold(daily[x["s"]], made) if x["s"] in daily else None
+            if mh_:
+                mae.append(mh_[0])
+            if k == len(months) - 1:
+                detail.append({"코인": x["s"].split("/")[0], "기록 가격": m["p0"].get(x["perp"]), "지금": px.get(x["perp"]),
+                               "그냥 보유(%)": round(100 * r_, 1),
+                               "150일선 위에서만(%)": round(100 * mh_[0], 1) if mh_ else None,
+                               "지금 150일선": ("위" if mh_[1] else "아래") if mh_ and mh_[1] is not None else "-"})
+        sig = [t for t in done if made <= pd.Timestamp(t["signal_ts"]) < end]
+        s_in = [float(t["R"]) for t in sig if t["symbol"] in names]
+        s_out = [float(t["R"]) for t in sig if t["symbol"] not in names]
+        all_in += s_in
+        all_out += s_out
+        avg = lambda v: float(np.mean(v)) if v else None
+        rows.append({"month": m["month"], "made_at": m["made_at"], "n_sel": len(m["sel"]), "n_uni": m.get("n", len(m["p0"])),
+                     "hold": avg(hold), "ma": avg(mae), "uni": avg(uni_r),
+                     "diff": (avg(hold) - avg(uni_r)) if hold and uni_r else None,
+                     "sig_in": (len(s_in), avg(s_in)), "sig_out": (len(s_out), avg(s_out))})
+    full = [r_ for r_ in rows if r_["diff"] is not None]
+    judge = {"months": len(log["months"]), "need": LT_JUDGE_MONTHS, "win": sum(1 for r_ in full if r_["diff"] > 1e-9),
+             "sig_in": (len(all_in), float(np.mean(all_in)) if all_in else None),
+             "sig_out": (len(all_out), float(np.mean(all_out)) if all_out else None)}
+    judge["ready"] = judge["months"] >= LT_JUDGE_MONTHS
+    judge["pass"] = bool(judge["ready"] and judge["win"] >= LT_JUDGE_WIN and len(all_in) >= LT_JUDGE_MIN_SIG
+                         and all_out and np.mean(all_in) > np.mean(all_out))
+    return {"rows": rows, "detail": detail, "judge": judge, "at": utc_now(), "prices_ok": bool(px)}
+
+
+def longterm_judge_text(j: Dict) -> str:
+    si, so = j["sig_in"], j["sig_out"]
+    sig = (f"명단 코인 신호 {si[0]}건 {si[1]:+.2f}R vs 나머지 {so[0]}건 {so[1]:+.2f}R" if si[1] is not None and so[1] is not None
+           else f"명단 코인 신호 {si[0]}건 · 나머지 {so[0]}건 (끝난 거래가 아직 적음)")
+    head = (f"명단 {j['months']}개 쌓임 → 판정: " + ("✅ 쓸만한 후보 (적용 여부는 그때 따로 결정)" if j["pass"] else "❌ 아직 근거 부족")
+            if j["ready"] else f"명단 {j['months']}/{j['need']}개 — 판정 전")
+    return f"{head} · 전체 평균보다 오른 달 {j['win']}개 · {sig}"
 
 
 # ---------- 시장 국면(5년 검증 분류): 표시용 — 국면별로 설정을 바꾸는 건 5년 교차 검증에서 효과가 없어 하지 않음

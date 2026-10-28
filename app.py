@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import io
 import threading
+import time
 import traceback
 
 import pandas as pd
@@ -61,8 +62,8 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-18 v32.3"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
-st.title("▲ ▲")
+APP_VERSION = "2026-10-28 v32.7"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
+st.title("▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
 if _engine_ver != APP_VERSION:
@@ -721,6 +722,9 @@ def recommendations() -> None:
     if ev_:
         st.warning(f"📅 이벤트 위험 시간대: {cmr.event_text(ev_)}. 크게 흔들리는 구간이라 신규 진입 리스크를 절반으로 "
                    "계산했어요. 시장가 진입은 피하고, 보유 포지션의 손절 주문을 확인하세요.")
+    _ct = cmr.chop_text(r.get("market_chop"))           # v32.6 시장 출렁임 지수
+    if _ct:
+        (st.warning if (r.get("market_chop") or {}).get("on") else st.caption)(_ct)
     _dt = cmr.fomc_drift_text(r.get("event_drift"))
     if _dt:
         st.info(_dt)
@@ -918,6 +922,119 @@ def phase_html(ph) -> str:
             f'설정은 그대로예요.</span></div>')
 
 
+# ---------------------------------------------------------------- v32.4 장기 후보(그림자 기록) — 표시·기록만
+LT_TRACK_HOURS = 6
+
+
+def _lt_worker(job: dict, n: int) -> None:
+    """뒤에서 실행: (이번 달 명단이 없으면) 명단 만들기 → 기록·클라우드 저장 → 이후 성과 계산. 화면을 막지 않음."""
+    try:
+        if job.get("due"):
+            cmr.cloud_pull(0)                       # 다른 기기(PC↔폰)가 이번 달 명단을 이미 만들었으면 그걸 씀
+            if cmr.longterm_due():
+                job["stage"] = "명단"
+                res = cmr.longterm_scan(n, progress_cb=lambda k, tot, s_: job.update(done=k, total=tot, cur=s_))
+                cmr.record_longterm(res)
+                cmr.cloud_sync(force=True)
+        job["stage"] = "성과"
+        store["lt_track"] = cmr.longterm_tracking()
+        job["error"] = None
+    except Exception as e:
+        job["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+    finally:
+        job["running"] = False
+        job["ended"] = time.time()
+
+
+def lt_kick() -> None:
+    """이번 달 명단이 없거나 성과 계산이 6시간 넘게 지났으면 뒤에서 계산 시작 (실패하면 30분 뒤 다시)."""
+    lock = store.setdefault("lt_lock", threading.Lock())
+    with lock:
+        job = store.get("lt_job") or {}
+        if job.get("running") or (job.get("error") and time.time() - job.get("ended", 0) < 1800):
+            return
+        due = cmr.longterm_due()
+        trk = store.get("lt_track")
+        n_months = len(cmr.load_longterm_log()["months"])
+        stale = (n_months > 0 and (trk is None or cmr.utc_now() - trk["at"] > pd.Timedelta(hours=LT_TRACK_HOURS)
+                                   or len(trk.get("rows", [])) != min(n_months, 12)))
+        if not due and not stale:
+            return
+        job = {"running": True, "due": due, "stage": "명단" if due else "성과", "done": 0, "total": 0, "cur": "",
+               "error": None, "started": time.time()}
+        store["lt_job"] = job
+    threading.Thread(target=_lt_worker, args=(job, int(top_n)), daemon=True).start()
+
+
+def _pct(x, signed: bool = True) -> str:
+    return "-" if x is None or (isinstance(x, float) and pd.isna(x)) else (f"{x:+.1%}" if signed else f"{x:.0%}")
+
+
+def render_longterm_section(setups, watch) -> None:
+    lt_kick()
+    log = cmr.load_longterm_log()
+    cur = log["months"][-1] if log["months"] else None
+    job = store.get("lt_job") or {}
+    title = "🌱 장기 후보 — 그림자 기록 (추천 아님)" + (f" · {cur['month']} 명단 {len(cur['sel'])}개" if cur else "")
+    with st.expander(title):
+        st.caption("매달 월봉이 마감되면(한국 1일 09시) 그 뒤 처음 앱을 열 때 **'월봉 수렴 + 긴 바닥'** 코인을 자동으로 골라 "
+                   "기록하고, 이후 성과를 쌓아요. **추천 규칙·순위·위험에는 전혀 안 쓰여요** — 이 조건이 진짜인지 실전 기록으로 "
+                   "확인하는 용도예요.")
+        if job.get("running"):
+            if job.get("stage") == "명단":
+                st.info(f"⏳ 이번 달 명단 만드는 중 {job.get('done', 0)}/{job.get('total') or '?'} {job.get('cur', '')} — "
+                        "코인마다 일봉을 받아서 몇 분 걸려요(처음 한 번은 더 오래). 다른 화면을 봐도 계속 돌아가요.")
+            else:
+                st.info("⏳ 기록 이후 성과 계산 중...")
+        if job.get("error"):
+            st.warning(f"계산이 실패했어요: {job['error']} — 30분 뒤 앱을 열면 다시 시도해요.")
+        if cur:
+            sig_syms = {getattr(s_, "symbol", "") for s_ in setups}
+            watch_syms = {w.get("symbol") for w in watch}
+            st.markdown(f"**{cur['month']} 명단** — 스캔 코인 {cur.get('n', len(cur['p0']))}개 중 {len(cur['sel'])}개 · "
+                        f"기록 {kst(cur['made_at'])} · 기준 가격: {cur.get('price_src', '선물 현재가')}")
+            rows = [{"코인": x["s"].split("/")[0], "수렴": _pct(x.get("f1"), False), "고점 후(주)": x.get("wk"),
+                     "고점 대비": _pct(x.get("dd")), "150일선": {True: "위", False: "아래"}.get(x.get("a150"), "-"),
+                     "90일": _pct(x.get("r90")),
+                     "지금 앱": "🔔 신호" if x["s"] in sig_syms else ("알림 대기" if x["s"] in watch_syms else "")}
+                    for x in cur["sel"]]
+            if rows:
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            else:
+                st.write("이번 달은 조건에 맞는 코인이 없어요.")
+            st.caption("수렴 = 최근 3개월 폭 ÷ 최근 12개월 폭(월봉, 작을수록 좁게 뭉침 · 스캔 코인 중 하위 1/3) · 고점 후 = "
+                       "Bitget 선물 상장 이후 최고점에서 지난 주 수(상위 1/3) · 고점 대비·150일선·90일 = 기록할 때 기준 · "
+                       "'지금 앱' = 지금 추천 목록·알림 목록에 있는지")
+            trk = store.get("lt_track")
+            if trk and trk.get("rows"):
+                st.markdown("**기록 이후 성과** — 기록 시점 가격 → 지금, 같은 비중 · 수수료·펀딩 빼기 전")
+                st.dataframe(pd.DataFrame([{
+                    "명단": r_["month"], "코인": r_["n_sel"], "명단 그냥 보유": _pct(r_["hold"]),
+                    "150일선 위에서만": _pct(r_["ma"]), "스캔 코인 전체": _pct(r_["uni"]), "차이": _pct(r_["diff"]),
+                    "앱 신호 R 명단": (f"{r_['sig_in'][1]:+.2f} ({r_['sig_in'][0]}건)" if r_["sig_in"][0] else "-"),
+                    "앱 신호 R 나머지": (f"{r_['sig_out'][1]:+.2f} ({r_['sig_out'][0]}건)" if r_["sig_out"][0] else "-")}
+                    for r_ in reversed(trk["rows"])]), hide_index=True, use_container_width=True)
+                st.markdown(f"- {cmr.longterm_judge_text(trk['judge'])}")
+                if trk.get("detail"):
+                    st.markdown(f"**{trk['rows'][-1]['month']} 명단 코인별**")
+                    st.dataframe(pd.DataFrame(trk["detail"]), hide_index=True, use_container_width=True)
+                st.caption(f"마지막 계산 {kst(trk['at'])} · {LT_TRACK_HOURS}시간마다 다시 계산"
+                           + ("" if trk.get("prices_ok") else " · ⚠️ 현재가를 못 받아 수익이 비어 있어요"))
+        elif not job.get("running"):
+            st.write("아직 명단이 없어요. 앱을 열어 두면 자동으로 만들어요.")
+        st.markdown(
+            "**왜 추천이 아닌가요?**\n"
+            "- 5년 검증에서 이 명단 코인에서 나온 앱 4시간봉 신호는 거래당 R이 나머지의 약 2배였어요. 하지만 매달 같은 수의 "
+            "코인을 **무작위로** 골라도 그만큼 나오는 경우가 5~18%라 우연을 배제하지 못했어요.\n"
+            "- 10배 이상 오른 코인 7개는 모두 2022~23년 바닥 한 번에서 나왔어요. 사이클 한 번이라 '미리 고르는 법'은 확인하지 못했어요.\n"
+            "- 2025-10-10 급락 꼬리가 12개월 폭을 키워서 2026-10 명단까지는 '수렴'이 실제보다 좋아 보이는 코인이 있어요.\n\n"
+            "**그래도 쓰고 싶다면** — 명단 코인이라도 **앱 신호가 뜰 때만** 평소 규칙대로 들어가세요. 장기 보유는 아주 소액으로, "
+            "150일선 아래로 마감하면 쉬는 쪽으로.\n\n"
+            f"**판정 (미리 정함)** — 명단 {cmr.LT_JUDGE_MONTHS}개(1년)가 쌓이면 ① 명단 코인 앱 신호의 거래당 R이 나머지보다 높고"
+            f"(명단 쪽 {cmr.LT_JUDGE_MIN_SIG}건 이상) ② 명단 평균이 전체 평균보다 높은 달이 {cmr.LT_JUDGE_MONTHS}달 중 "
+            f"{cmr.LT_JUDGE_WIN}달 이상이면 '쓸만한 후보'. 적용 여부는 그때 따로 결정해요.")
+
+
 def render_today() -> None:
     now_kst = pd.Timestamp.now(tz="UTC").tz_localize(None) + pd.Timedelta(hours=9)
     st.markdown(f"### 📅 {now_kst:%m월 %d일} 오늘의 투자")
@@ -975,6 +1092,9 @@ def render_today() -> None:
     if ev_now:
         st.warning(f"📅 이벤트 위험 시간대: {cmr.event_text(ev_now)} — 발표 {cmr.EVENT_PRE_H}시간 전부터 {cmr.EVENT_POST_H}시간 "
                    "후까지는 크게 흔들려요. 신규 진입 리스크 절반·시장가 진입 자제·손절 주문 확인.")
+    _ct = cmr.chop_text(r.get("market_chop"))           # v32.6 시장 출렁임 지수
+    if _ct:
+        (st.warning if (r.get("market_chop") or {}).get("on") else st.caption)(_ct)
     _dt = cmr.fomc_drift_text(r.get("event_drift"))
     if _dt:
         st.info(_dt)
@@ -1010,6 +1130,10 @@ def render_today() -> None:
                 "- 보유 포지션 수를 설정의 '지금 보유 중인 포지션 수'에 반영했나요?\n"
                 "- 어제 청산한 거래를 '📋 추천' 화면 아래 '매매 결과 기록'에 적었나요? (서킷브레이커용)\n"
                 "- 자동 방어 경고(⚠️·⏸)가 있으면 그 유형은 비중을 줄이거나 쉬세요.")
+    try:
+        render_longterm_section(setups, watch)
+    except Exception as e:   # 그림자 기록이 화면을 깨뜨리지 않게
+        st.caption(f"🌱 장기 후보 표시 실패: {type(e).__name__}: {str(e)[:120]}")
     render_simulator()
 
 
@@ -1115,8 +1239,9 @@ with st.expander("📖 용어 / 사용법"):
         "- **청산 계획(v29)**: 목표1(추적 시작)에 닿아도 팔지 않고 손절을 진입가로 올림 → 이후 최고가(롱)·최저가(숏)에서 "
         "카드에 적힌 폭(박스 돌파 1 ATR, 되돌림·눌림목 0.75 ATR)만큼 되돌리면 전량 정리. 최대 보유 10일(60봉). "
         "진입 직후 손절 주문과 트레일링 주문(활성화 가격 = 목표1)을 함께 걸어두면 돼요.\n"
-        "- **➕ 추가 진입(선택)**: 4시간봉 종가가 진입가 + 1R(손절폭만큼 유리)을 넘으면 계좌 0.5% 위험만큼 한 번 더. 추가분 손절 = 처음 진입가, "
-        "정리는 본 포지션과 같이. 5년 검증 두 사이클 모두 수익↑·낙폭 +4%p.\n"
+        "- **➕ 불타기(v32.7)**: 박스 돌파·돌파 후 되돌림·추세 눌림목이 목표1에 처음 닿으면 처음 수량의 0.5배 추가. "
+        "진입할 때 목표1 가격에 역지정가 주문을 같이 걸어 두면 돼요. 추가분도 같은 추적 손절로 함께 정리. "
+        "5년 검증: 같은 최대 낙폭 연수익 전 신호 6/6·수동 6/6(두 번 통과), 거래당 +0.43 → +0.51R. 같은 개수를 무작위 시점에 넣으면 효과 없음.\n"
         "- **🔁 돌파 후 되돌림**: 실전 추적 30건 평균이 플러스가 될 때까지 위험 절반. **📈 추세 눌림목**: 위험 ½ 고정(실전 30건 뒤에도 그대로).\n"
         "- **🧪 빗각 지지(v31 시험 운용)**: 일봉에서 큰 저점 → 가장 큰 양봉 고가로 각도를 잡고, 그 각도를 이후 주요 꼭짓점 6곳에 평행 복사한 선에 "
         "닿고 위에서 마감(200일선 위)하면 09시 시장가 롱. 손절 = 진입가 − 2 일봉 ATR, 목표 5R 뒤 1.5 ATR 추적, 최대 30일. 위험 ¼로 시작, "
@@ -1127,6 +1252,9 @@ with st.expander("📖 용어 / 사용법"):
         "실전 30건 평균이 플러스면 0.5배로 승격.\n"
         "- **🗓 일요일 진입(v32.1)**: 박스 돌파·돌파 후 되돌림·추세 눌림목 신호의 봉이 일요일(한국 시각)에 마감하면 위험 ½로 계산. "
         "5년 검증에서 일요일 진입만 3자료·두 사이클 모두 거래당 손해(손절 72~76%, 다른 날 56~58%). 사용자 결정으로 적용.\n"
+        "- **🌊 시장 출렁임 위험 ½(v32.6)**: 스캔한 코인들의 4시간봉 Choppiness Index(28봉) 중앙값이 52를 넘으면 "
+        "박스 돌파·돌파 후 되돌림·추세 눌림목 신규 진입 위험 ½. 5년 3자료 교차 검증에서 같은 낙폭 연수익이 전 신호 6/6·수동 6/6 높고 "
+        "(평균 +52%p·+21%p) 무작위 대조 20번을 모두 이김. 결과를 본 뒤 고른 기간이라 사용자 결정으로 적용.\n"
         "- **📐 FOMC 선반영 참고(v32.3)**: FOMC 발표 3일 전부터 발표 뒤 24시간까지, 발표 전 3일 알트·BTC 수익률과 "
         "과거 경향을 보여 줘요. 5년 FOMC 40회에서 알트가 3일 오른 채 발표를 맞으면 14회 중 11회 발표 뒤 24시간 내렸고, "
         "내린 채 맞으면 26회 중 20회 올랐어요(판단 기준 = 발표 전 마지막 09·13·17·21시 마감 봉). BTC·ETH는 약하고 CPI·실적엔 없음. "

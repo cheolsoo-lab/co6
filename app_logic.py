@@ -246,19 +246,23 @@ def exec_rules(setup) -> list:
     return out
 
 
-PYRAMID_X, PYRAMID_RISK_PCT = 1.0, 0.5     # 5년 검증: +1R에서 0.5% 추가 → 두 사이클 모두 연 +15~40%p, 최대 낙폭 +4%p
+PYRAMID_SIZE = 0.5     # v32.7: 목표1에 닿으면 처음 수량의 0.5배 추가(5년 검증 전 신호 6/6 · 수동 6/6, 두 번 통과)
 
 
 def pyramid_line(setup) -> Optional[str]:
-    """추가 진입(피라미딩) 안내: 4시간봉 종가가 진입가 + 1R을 넘으면 0.5% 위험만큼 한 번 추가, 추가분 손절 = 처음 진입가."""
-    e_, sl_ = getattr(setup, "entry_price", None), getattr(setup, "sl", None)
-    if not e_ or not sl_ or e_ == sl_:
+    """불타기 안내(v32.7): 목표1에 처음 닿을 때 처음 수량의 0.5배 추가 — 추가분도 같은 추적 손절로 함께 정리."""
+    e_, sl_, tp_ = getattr(setup, "entry_price", None), getattr(setup, "sl", None), getattr(setup, "tp1", None)
+    if not e_ or not sl_ or not tp_ or e_ == sl_:
+        return None
+    from crypto_market_regime import SETUP_FAMILY, CHOP_FAMILIES, exit_of  # 지연 임포트
+    if SETUP_FAMILY.get(getattr(setup, "bias", ""), "") not in CHOP_FAMILIES:
         return None
     lg = side_info(setup.bias)[0] == "long"
     m = int(getattr(setup, "perp_mult", 1) or 1)
-    add = e_ + (1 if lg else -1) * PYRAMID_X * abs(e_ - sl_)
-    return (f"➕ 추가 진입(선택): 4시간봉 종가가 {fmt_price(add * m)} {'위' if lg else '아래'}로 마감하면 계좌 {PYRAMID_RISK_PCT}% 위험만큼 "
-            f"한 번 더 진입 — 추가분 손절 = 처음 진입가 {fmt_price(e_ * m)}, 정리는 본 포지션과 같이(같은 추적 손절)")
+    trail_k = exit_of(setup)[1]
+    return (f"➕ 불타기: 목표1 {fmt_price(tp_ * m)}에 닿으면 처음 수량의 {PYRAMID_SIZE:g}배 추가 — 진입할 때 목표1 가격에 "
+            f"{'매수' if lg else '매도'} 역지정가(조건부) 주문을 같이 걸어 두면 돼요. 추가분도 처음 물량과 같은 추적 손절"
+            f"({'최고가 −' if lg else '최저가 +'} {trail_k:g} ATR, 진입가보다 불리해지지 않게)로 함께 정리")
 
 
 def elapsed_note(setup):
@@ -551,6 +555,9 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
         warn += ('<div class="over">🗓 일요일 진입 — 5년 검증에서 일요일에 들어간 박스 돌파·되돌림·눌림목은 손절이 잦아'
                  '(72~76%, 다른 날 56~58%) 거래당 손해였어요. 조용한 일요일 변동폭으로 잡은 손절이 월요일 오전 변동성에 걸리기 쉬워 '
                  '리스크를 절반으로 계산했어요</div>')
+    if getattr(setup, "chop_half", False):
+        warn += (f'<div class="over">🌊 시장 출렁임 지수 {getattr(setup, "chop_value", 0) or 0:.1f} (기준 52 초과) — 시장 전체가 방향 없이 출렁이는 구간이에요. '
+                 '5년 검증에서 이런 때 박스 돌파·되돌림 성적이 크게 떨어져 리스크를 절반으로 계산했어요</div>')
     if getattr(setup, "half_start", False):
         warn += ('<div class="over">🌱 새 매매법 — 실전 기록이 쌓이기 전이라 리스크를 절반으로 낮춰 수량을 계산했어요 '
                  '(실전 추적 30건 평균이 플러스면 자동으로 정상 리스크)</div>')
@@ -582,6 +589,10 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
     if getattr(setup, "already_tracked", ""):
         warn += (f'<div class="over">📌 같은 코인·같은 방향 추천({e(setup.already_tracked)})이 아직 진행 중이에요 — '
                  '검증 규칙은 코인당 한 포지션이라 이 추천은 실전 추적에 따로 남지 않아요. 앞 포지션을 들고 있으면 추가 진입하지 마세요</div>')
+    if getattr(setup, "opposite_tracked", ""):
+        warn += (f'<div class="over">↔️ 이 코인은 반대 방향 추천({e(setup.opposite_tracked)})이 아직 진행 중이에요 — '
+                 '검증 규칙은 방향과 상관없이 코인당 한 포지션이라 이 추천은 건너뛰고 실전 추적에도 남지 않아요. '
+                 '앞 포지션은 원래 손절·목표대로 두세요 (5년 검증에서 이런 경우는 자료마다 4~7번뿐이고, 무시·양쪽 보유·뒤집기의 결과 차이가 거의 없었어요)</div>')
     return (f'<div class="cc {side}">'
             f'<div class="cc-head"><span class="pill {side}">{side.upper()} {e(side_kr)}</span>'
             f'<span class="sym">{e(setup.symbol)}</span>{tags}</div>'
@@ -777,9 +788,11 @@ def regime_detail_html(regime) -> str:
 
 # ---------------------------------------------------------------- v29.6 보유 중 포지션 관리
 HOLD_EVIDENCE = ("5년 검증(Bitget 선물, 같은 매매법): **규칙대로 들고 있기가 가장 나았어요.** "
-                 "물타기는 한 거래 최대 손실을 같게 맞추면 두 기간 모두 연수익이 줄었고(2021~23 +67%→+50%, 2024~ +129%→+67%), "
-                 "손절을 내리고 물타면 더 나빴어요. 불리할 때 일찍 정리하는 것도 기간마다 엇갈려 이득이 없었어요. "
-                 "불타기(+1R 종가에 0.5% 추가)는 선택 — 두 기간 모두 수익↑, 낙폭 +4%p.")
+                 "물타기는 롱·숏 각각 72가지(자리 0.33·0.5·0.75R × 크기 × 손절 × 청산 × 위험)를 3개 거래소 5년으로 시험해도 "
+                 "Bitget 두 기간을 모두 나아지게 한 방식이 하나도 없었어요. 0.5R 넘게 밀린 거래는 롱 약 80%·숏 약 75%가 결국 손절로 끝났고, "
+                 "추가 물량은 수익보다 낙폭을 더 키워요. 손절을 넓히고 물타면 더 나빴어요. "
+                 "불리할 때 일찍 정리하는 것도 기간마다 엇갈려 이득이 없었어요. "
+                 "불타기(목표1에 닿을 때 처음 수량의 0.5배 추가, 같은 추적 손절로 함께 정리)는 사전 기준 두 번 통과 — v32.7부터 적용.")
 
 
 def held_position_card(t: dict) -> tuple:
@@ -803,17 +816,22 @@ def held_position_card(t: dict) -> tuple:
         lines.append(f"🛑 목표1 도달 → 손절은 본전 이상. 다음 4시간 손절선 **{p(lv['stop_next'])}** "
                      f"({'최고가 −' if long_ else '최저가 +'} {lv['trail']:g} ATR, 봉마다 유리한 쪽으로만 옮김). 트레일링 주문이 있으면 그대로 두기")
     pyr = lv.get("pyramid") or {}
+    sz_ = pyr.get("size", 0.5)
     if pyr.get("first_idx") is None:
-        lines.append(f"➕ 불타기(선택): 4시간봉 종가가 {p(pyr.get('level'))} {'위로' if long_ else '아래로'} 마감하면 "
-                     f"계좌 0.5% 위험만큼 한 번 추가 · 추가분 손절 = 진입가 {p(lv['entry'])}")
+        lines.append(f"➕ 불타기: 목표1 {p(pyr.get('level'))}에 닿으면 처음 수량의 {sz_:g}배 추가 — 목표1 가격에 "
+                     f"{'매수' if long_ else '매도'} 역지정가 주문을 걸어 두면 자동. 추가분도 같은 추적 손절로 함께 정리")
     elif pyr.get("now"):
-        lines.append(f"➕ 불타기(선택): ✅ 방금 마감한 봉에서 조건 충족 — 지금 계좌 0.5% 위험만큼 추가 가능 · "
-                     f"추가분 손절 = 진입가 {p(lv['entry'])}")
+        lines.append(f"➕ 불타기: ✅ 방금 마감한 봉에서 목표1에 닿음 — 주문이 체결됐으면 추가분 손절도 **{p(pyr.get('add_stop'))}**부터 "
+                     f"같은 추적 손절로 함께. 주문을 안 걸어 뒀다면 지금 가격이 목표1 근처일 때만 {sz_:g}배 추가, 멀어졌으면 건너뛰기")
     else:
         fk = (pd.Timestamp(pyr["first_ts"]) + pd.Timedelta(hours=4 + 9)).strftime("%m-%d %H:%M")
-        lines.append(f"➕ 불타기: 조건은 {fk} 마감 봉에서 이미 충족 — 그때 추가했으면 추가분 손절 {p(lv['entry'])} 유지, "
+        lines.append(f"➕ 불타기: {fk} 마감 봉에서 목표1에 이미 닿음 — 추가했으면 추가분도 다음 4시간 손절선 {p(lv['stop_next'])}로 함께, "
                      "놓쳤으면 건너뛰기(늦게 추가하면 검증 밖)")
-    lines.append("🚫 물타기·손절 내리기: 하지 않기")
+    if rn is not None and rn <= -0.3:
+        lines.append(f"🚫 물타기·손절 {'내리기' if long_ else '올리기'}: 하지 않기 — 이만큼 밀린 {'롱' if long_ else '숏'}은 "
+                     f"5년 검증에서 대부분 손절로 끝났어요(0.5R 넘게 밀리면 약 {80 if long_ else 75}%). 물타기 72가지 중 나아진 방식이 없었어요")
+    else:
+        lines.append(f"🚫 물타기·손절 {'내리기' if long_ else '올리기'}: 하지 않기")
     left = max(0, lv["hmax"] - lv["held"])
     lines.append(f"⏱ 남은 시간 {left}봉(약 {left * 4 / 24:.1f}일) — 그때까지 안 끝나면 그 봉 종가에 정리")
     return title, lines
