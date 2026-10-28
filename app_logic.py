@@ -645,7 +645,7 @@ def _reason_txt(r: dict) -> str:
 def direction_html(d: dict, macro_filter: Optional[Dict] = None) -> str:
     """v30 메인 거시 카드 — 검증을 통과한 것만 위에, 약한 참고는 아래로.
     ① BTC 보유 판단(150일선, 5년 검증 통과) ② 추천 신호 규칙(거시 필터, 검증 통과)
-    ③ 앞으로 2주 기울기(적중 56~58%지만 매매하면 손실 → 참고) ④ 1~3일(어떤 지표도 50% 못 넘음 → 판단 안 함)"""
+    ③ 앞으로 2주 기울기(시간 순서 재검증에서 동전 수준 → 참고만) ④ 1~3일(어떤 지표도 50% 못 넘음 → 판단 안 함)"""
     e = html.escape
     mid, sh, hd = (d or {}).get("mid") or {}, (d or {}).get("short") or {}, (d or {}).get("hold") or {}
     from crypto_market_regime import BTC_HOLD_MA, BTC_HOLD_STATS
@@ -672,13 +672,13 @@ def direction_html(d: dict, macro_filter: Optional[Dict] = None) -> str:
     rule = f'<div class="act" style="margin-top:10px">{macro_trade_line(macro_filter)}</div>'
     if mid.get("p") is not None:
         b = mid["bin"]
-        two = (f'<div class="drow muted"><div class="h">앞으로 2주 · 약한 참고</div>'
+        two = (f'<div class="drow muted"><div class="h">앞으로 2주 · 참고(예측력 확인 안 됨)</div>'
                f'<div class="v">{e(mid["label"])} · BTC 오를 확률 {mid["p"]:.0%}</div>'
                f'<div class="s">과거 이런 확률일 때 BTC 오른 비율 {b["p_up"]:.0%}(평균 {b["mean"]:+.1%}) · 알트 지수 {b["alt_p_up"]:.0%}({b["alt_mean"]:+.1%}). '
                f'근거: {" · ".join(e(_reason_txt(r)) for r in mid.get("reasons", []))}</div>'
-               f'<div class="s" style="opacity:.7">적중 56~58%로 동전보다 조금 나은 정도 — 이걸로 BTC를 사고팔면 한 기간에서 손실이라 매매엔 쓰지 않아요</div></div>')
+               f'<div class="s" style="opacity:.7">실제로 쓸 때처럼 시간 순서로 다시 시험하면(2022-08~2026-09, 매달 다시 학습) 적중 45~51%·AUC 0.49로 동전 수준이었어요. 위 \'과거 비율\'은 미래 자료가 섞인 시험에서 나온 값이라 실제보다 좋게 보여요 — 참고로만 보고 매매엔 쓰지 않아요</div></div>')
     else:
-        two = (f'<div class="drow muted"><div class="h">앞으로 2주 · 약한 참고</div><div class="v">계산 못 함</div>'
+        two = (f'<div class="drow muted"><div class="h">앞으로 2주 · 참고(예측력 확인 안 됨)</div><div class="v">계산 못 함</div>'
                f'<div class="s">{e(mid.get("error", "자료 부족"))}</div></div>')
     r3 = sh.get("r3d")
     short = (f'<div class="drow muted"><div class="h">앞으로 1~3일</div><div class="v">판단 안 함</div>'
