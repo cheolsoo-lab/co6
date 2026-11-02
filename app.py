@@ -6,6 +6,7 @@ app.py — 코인 추천 웹 화면 (핸드폰 우선)
 동작 방식
 - 전체 스캔(무거움)은 신호 봉이 마감될 때만 자동 실행 (4시간봉 기준 한국시간 01·05·09·13·17·21시 직후)
 - 그 사이에는 추천 코인의 현재가만 몇 초 만에 받아서 상태(진입가 근처/추격/무효/놓침)를 자동 갱신
+- v32.8: 전체 스캔은 서버 쪽 별도 작업으로 실행 → 폰 화면을 끄거나 다른 앱으로 가도 분석이 끊기지 않고 끝까지 진행
 ⚠️ 참고용 화면입니다. 자동 주문 기능은 없습니다.
 """
 import contextlib
@@ -34,7 +35,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="▲", page_icon="▲", layout="centered",
+st.set_page_config(page_title="코인 추천", page_icon="📈", layout="centered",
                    initial_sidebar_state="collapsed")
 st.markdown(f"<style>{L.CSS}</style>", unsafe_allow_html=True)
 
@@ -62,8 +63,8 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-10-28 v32.7"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
-st.title("▲")
+APP_VERSION = "2026-11-02 v32.8"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
+st.title("📈 코인 추천")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
 if _engine_ver != APP_VERSION:
@@ -561,44 +562,81 @@ def _cloud_after_scan() -> None:
         pass
 
 
-def run_scan(force: bool) -> None:
-    prog = st.progress(0.0, text="다른 분석이 진행 중이면 잠시 기다려요...")
+def _scan_worker(job: dict, cfg: dict) -> None:
+    """v32.8: 전체 스캔을 서버 쪽 별도 작업으로 실행 → 폰 화면을 끄거나 다른 앱으로 가도(접속이 끊겨도) 분석이 계속됨.
+    화면(접속)은 진행 상황만 읽어서 보여주고, 다시 열면 이어서 보거나 끝난 결과를 바로 보여줌."""
+    try:
+        with store["lock"]:
+            r = store["result"]
+            # 다른 접속이 이미 이번 봉 기준으로 스캔했다면 그 결과를 재사용
+            if not job["force"] and r is not None and not cmr.needs_full_rescan(r.get("asof_utc"), r.get("timeframe")):
+                return
+            cmr.TOP_N_BY_VOLUME = cfg["top_n"]
+            cmr.BITGET_ONLY = cfg["bitget_only"]
+            cmr.ENABLED_FAMILIES = set(cfg["fams"])
+            cmr.DIAG_BULL_ONLY = bool(cfg["diag_bull"])
+            cmr.AUTO_DEFENSE = cfg["auto_def"]
+            cmr.MACRO_FILTER = cfg["macro_f"]
+            cmr.set_timeframe(cfg["tf"])
 
-    def cb(i: int, n: int, sym: str) -> None:
-        prog.progress(min(i / max(n, 1), 1.0), text=f"분석 중 {i}/{n}  {sym}")
+            def cb(i: int, n: int, sym: str) -> None:   # 화면 함수(st.*)는 쓰지 않음 — 진행 상황만 기록
+                job.update(done=i, total=n, cur=sym)
 
-    with store["lock"]:
-        r = store["result"]
-        # 기다리는 동안 다른 접속이 이미 이번 봉 기준으로 스캔했다면 그 결과를 재사용
-        if not force and r is not None and not cmr.needs_full_rescan(r.get("asof_utc"), r.get("timeframe")):
-            prog.empty()
-            return
-        cmr.TOP_N_BY_VOLUME = top_n
-        cmr.BITGET_ONLY = bitget_only
-        cmr.ENABLED_FAMILIES = set(fams)
-        cmr.DIAG_BULL_ONLY = bool(diag_bull)
-        cmr.AUTO_DEFENSE = auto_def
-        cmr.MACRO_FILTER = macro_f
-        cmr.set_timeframe(tf)
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                res_ = cmr.run_analysis(risk_cfg, cb)
-            store.update(result=res_, log=buf.getvalue(), error=None, scan_cfg=scan_cfg, live_at=cmr.utc_now())
-        except Exception:
-            store["error"] = traceback.format_exc()
-            store["log"] = buf.getvalue()
-        _cloud_after_scan()   # 실전 추적이 갱신됐으니 바로 클라우드에 저장
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    res_ = cmr.run_analysis(cfg["risk_cfg"], cb)
+                store.update(result=res_, log=buf.getvalue(), error=None, scan_cfg=cfg["scan_cfg"], live_at=cmr.utc_now())
+            except Exception:
+                store["error"] = traceback.format_exc()
+                store["log"] = buf.getvalue()
+            _cloud_after_scan()   # 실전 추적이 갱신됐으니 바로 클라우드에 저장
+    except Exception:
+        store["error"] = traceback.format_exc()
+    finally:
+        job["running"] = False
+        job["ended"] = time.time()
+
+
+def start_scan(force: bool) -> dict:
+    """진행 중인 스캔이 있으면 그것을 돌려주고, 없으면 서버 쪽에서 새로 시작."""
+    lock = store.setdefault("scan_job_lock", threading.Lock())
+    with lock:
+        job = store.get("scan_job") or {}
+        if job.get("running"):
+            return job
+        job = {"running": True, "force": force, "done": 0, "total": 0, "cur": "", "started": time.time()}
+        store["scan_job"] = job
+    cfg = dict(top_n=top_n, bitget_only=bitget_only, fams=tuple(fams), diag_bull=diag_bull, auto_def=auto_def,
+               macro_f=macro_f, tf=tf, risk_cfg=risk_cfg, scan_cfg=scan_cfg)
+    threading.Thread(target=_scan_worker, args=(job, cfg), daemon=True).start()
+    return job
+
+
+def wait_scan(job: dict) -> None:
+    """진행 막대만 보여주며 기다림. 이 화면이 닫혀도(폰 화면 꺼짐·다른 앱) 분석은 서버에서 끝까지 진행됨."""
+    prog = st.progress(0.0, text="분석 준비 중...")
+    while job.get("running"):
+        n, i = job.get("total") or 0, job.get("done") or 0
+        prog.progress(min(i / max(n, 1), 1.0),
+                      text=f"분석 중 {i}/{n}  {job.get('cur', '')} · 화면을 꺼도 서버에서 계속 분석해요")
+        time.sleep(0.5)
     prog.empty()
 
 
 top_l, top_r = st.columns([3, 2])
 refresh = top_r.button("🔄 새로 분석", type="primary", use_container_width=True)
-cur = store["result"]
-forced = refresh or store.get("force_rescan", False)
-if forced or cur is None or cmr.needs_full_rescan(cur.get("asof_utc"), cur.get("timeframe")):
-    store["force_rescan"] = False
-    run_scan(force=forced)
+_job = store.get("scan_job") or {}
+if _job.get("running"):            # 다른 기기·이전 화면에서 시작한 분석이 진행 중이면 이어서 보여줌
+    wait_scan(_job)
+else:
+    cur = store["result"]
+    forced = refresh or store.get("force_rescan", False)
+    if forced or cur is None or cmr.needs_full_rescan(cur.get("asof_utc"), cur.get("timeframe")):
+        store["force_rescan"] = False
+        wait_scan(start_scan(force=forced))
+if store["result"] is not None:
+    st.session_state["shown_asof"] = store["result"].get("asof_utc")
 
 res = store["result"]
 if store["error"]:
@@ -693,11 +731,20 @@ def render(items: list, slots: int = 10 ** 6) -> None:
             st.code(L.order_memo(s, sizing, L.leverage_guide(px_, s.sl)), language=None)
 
 
+def _needs_page_reload() -> bool:
+    """화면을 켜둔 채로 ① 새 봉이 마감됐거나 ② 다른 기기·작업이 새 분석을 끝냈거나 ③ 분석이 진행 중이면 화면 전체를 다시 그림."""
+    r0 = store["result"]
+    if (store.get("scan_job") or {}).get("running"):
+        return True
+    if r0 is None or store["error"]:
+        return False
+    return (cmr.needs_full_rescan(r0.get("asof_utc"), r0.get("timeframe"))
+            or st.session_state.get("shown_asof") != r0.get("asof_utc"))
+
+
 def recommendations() -> None:
     # 화면을 켜둔 채 봉이 마감되면(자동 갱신 중 감지) 전체 재분석을 위해 앱 전체를 다시 실행
-    r0 = store["result"]
-    if fragment is not None and r0 is not None and not store["error"] \
-            and cmr.needs_full_rescan(r0.get("asof_utc"), r0.get("timeframe")):
+    if fragment is not None and _needs_page_reload():
         st.rerun()
     live_refresh_if_due()
     r = store["result"]
@@ -1140,6 +1187,12 @@ def render_today() -> None:
 fragment = getattr(st, "fragment", None)
 if page.endswith("오늘의 투자"):
     render_today()
+    if fragment is not None:   # v32.8: 첫 화면도 켜둔 채 봉이 마감되면 자동으로 새로 분석(예전엔 추천 화면에서만 됐음)
+        @fragment(run_every=30)
+        def _bar_watch() -> None:
+            if _needs_page_reload():
+                st.rerun()
+        _bar_watch()
     st.stop()
 if fragment is not None:
     recommendations = fragment(run_every=live_sec)(recommendations)
