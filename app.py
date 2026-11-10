@@ -35,7 +35,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="코인 추천", page_icon="📈", layout="centered",
+st.set_page_config(page_title="▲", page_icon="▲", layout="centered",
                    initial_sidebar_state="collapsed")
 st.markdown(f"<style>{L.CSS}</style>", unsafe_allow_html=True)
 
@@ -64,7 +64,7 @@ def kst(ts) -> str:
 
 
 APP_VERSION = "2026-11-10 v32.9"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
-st.title("📈 코인 추천")
+st.title("▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
 if _engine_ver != APP_VERSION:
