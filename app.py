@@ -35,7 +35,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="▲", page_icon="▲", layout="centered",
+st.set_page_config(page_title="코인 추천", page_icon="📈", layout="centered",
                    initial_sidebar_state="collapsed")
 st.markdown(f"<style>{L.CSS}</style>", unsafe_allow_html=True)
 
@@ -63,8 +63,8 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-11-02 v32.8"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
-st.title("▲ ▲")
+APP_VERSION = "2026-11-10 v32.9"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
+st.title("📈 코인 추천")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
 if _engine_ver != APP_VERSION:
@@ -830,6 +830,14 @@ def recommendations() -> None:
             st.caption("최근 실전 성과가 기준 아래로 떨어진 유형이에요. 결과는 계속 추적하고, 회복되면 자동으로 다시 추천돼요.")
             for s in paused:
                 st.markdown(L.paused_line(s), unsafe_allow_html=True)
+    skipped_ = r.get("vol_skipped") or []                # v32.9 흔들림 상위 1/3 눌림목 건너뛰기
+    if skipped_:
+        with st.expander(f"⏭ 건너뛴 눌림목 ({len(skipped_)}) — 흔들림 상위 1/3, 진입 대상 아님"):
+            st.caption("추세 눌림목 신호인데, 신호 봉에서 이 코인의 흔들림(4시간봉 14일 평균 진폭 ÷ 가격)이 스캔한 코인 중 "
+                       "가장 큰 1/3에 들어 건너뛰었어요. 5년 재현에서 6해 모두 나빴고(−0.07R vs 나머지 +0.30R), "
+                       "실전 10-24~11-09에도 8건 −0.40R(나머지 +0.30R)이었어요. 결과는 따로 계속 기록해요(아래 '건너뛴 눌림목 기록').")
+            for s in skipped_:
+                st.markdown(L.skip_line(s), unsafe_allow_html=True)
     watch = (r.get("filter_stats") or {}).get("watchlist") or []
     if watch:
         with st.expander(f"👀 돌파 임박 관찰 ({len(watch)}) — 아직 진입 신호 아님", expanded=not alive):
@@ -1249,6 +1257,26 @@ if _tracks:
         st.caption("ⓘ 보유 중인 R은 마지막 4시간봉 종가 기준(아직 안 끝난 값). 'R'·'청산'은 Bitget 선물 완성봉으로 계산하고, "
                    "PC·폰 기록은 클라우드(Gist)로 합쳐요 — 더 진행된 상태(종료 > 보유 > 대기)가 남아요. "
                    "실제 체결 가격·시점과는 조금 다를 수 있어요. '확인 불가' = 오래도록 차트를 받을 수 없어 끝낸 기록.")
+
+# v32.9: 건너뛴 눌림목 그림자 기록 — '건너뛴 게 맞았나' 확인용
+_skips = cmr.load_tracks(cmr.SKIP_TRACK_FILE)
+if _skips:
+    with st.expander(f"⏭ 건너뛴 눌림목 기록 ({len(_skips)}건 · 들어갔다면)"):
+        sm_ = cmr.skip_tracking_summary(_skips, _tracks)
+        a_, b_ = sm_["skip"], sm_["peer"]
+        fmt_ = lambda d: (f"끝남 {d['closed']}건 합 {d['sumR']:+.2f}R" + (f" (평균 {d['avgR']:+.2f}R, 손절 {d['stops']}건)" if d["avgR"] is not None else "")
+                          + f" · 보유 {d['open']}건 지금 {d['openR']:+.2f}R")
+        st.markdown(f"- **건너뛴 눌림목**: {fmt_(a_)}\n- **같은 기간 추천된 눌림목**: {fmt_(b_)}")
+        st.caption("건너뛴 쪽 평균이 추천된 쪽보다 계속 낮으면 규칙이 맞는 거예요. 실전 30건이 쌓이면 다시 판단해요. "
+                   "이 기록은 자동 방어·승격·코인당 한 포지션 계산에는 섞지 않아요.")
+        bar_s = pd.Timedelta(cmr.TIMEFRAME)
+        rows_s = [{"코인": t["symbol"].split("/")[0], "방향": "롱" if t["direction"] == "long" else "숏",
+                   "신호 봉 마감(한국)": (pd.Timestamp(t["signal_ts"]) + bar_s + pd.Timedelta(hours=9)).strftime("%m-%d %H:%M"),
+                   "상태": t["status"], "R": t.get("R") if t["status"] == "종료" else (
+                       round(t["live"]["R_now"], 2) if t.get("live") and t["live"].get("R_now") is not None else None),
+                   "청산": t.get("reason", "")}
+                  for t in sorted(_skips, key=lambda t: str(t["signal_ts"]), reverse=True)[:60]]
+        st.dataframe(pd.DataFrame(rows_s), hide_index=True, use_container_width=True)
 
 # v30.2: 추천받아 들어갔는데 추적에 안 보일 때 — 최근 3일 신호를 지금 규칙으로 다시 찾아 넣기
 with st.expander("🔧 추적에 안 보이는 추천 다시 찾기"):

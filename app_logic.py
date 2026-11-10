@@ -385,6 +385,16 @@ def paused_line(setup) -> str:
             f'<span class="k">(진입 {fmt_price(setup.entry_price)} · 손절 {fmt_price(setup.sl)})</span></div>')
 
 
+def skip_line(setup) -> str:
+    """v32.9: 흔들림 상위 1/3이라 건너뛴 눌림목 한 줄 (참고용)."""
+    side, side_kr, sub = side_info(setup.bias)
+    vr = getattr(setup, "vol_rank", None); vp = getattr(setup, "vol_pct", None); vl = getattr(setup, "vol_line", None)
+    why = (f"흔들림 {vp * 100:.1f}% (문턱 {vl * 100:.1f}%) · 스캔 코인 중 상위 {max(1, round((1 - vr) * 100)):.0f}%"
+           if vr is not None and vp is not None and vl is not None else "흔들림 상위 1/3")
+    return (f'<div class="dead"><b>{html.escape(setup.symbol)}</b> {side_kr} · {html.escape(sub)} '
+            f'<span class="k">({why} · 진입 {fmt_price(setup.entry_price)} · 손절 {fmt_price(setup.sl)})</span></div>')
+
+
 PORT_ICON = {"신규 진입": "🟢", "비중 조정": "🔄", "정리": "🔴", "유지": "⚪"}
 
 

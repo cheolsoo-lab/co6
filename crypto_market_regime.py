@@ -42,11 +42,12 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-11-02 v32.8"          # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-11-10 v32.9"          # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
 TRACK_FILE = "signal_tracking.json"               # 실전 추천 자동 추적 기록
+SKIP_TRACK_FILE = "skip_tracking.json"            # v32.9: 흔들림 상위라 건너뛴 눌림목의 그림자 기록(본 기록과 따로)
 LAB_REF_FILE = "lab_reference.json"               # 자동 방어 기준선(연구실 실행 때마다 신호 유형별 과거 성과 저장)
 AUTO_DEFENSE = True                               # 실전 성과가 기준선 아래로 떨어진 신호 유형을 자동 감축·중지
 FALLBACK_LOW_R = -0.3                             # 연구실 기준선이 없을 때 쓰는 보수적 고정 기준(최근 평균 R)
@@ -124,6 +125,15 @@ CHOP_N = 28
 CHOP_LIMIT = 52.0
 CHOP_RISK_MULT = 0.5
 CHOP_FAMILIES = SUNDAY_HALF_FAMILIES
+# v32.9: 추세 눌림목 × 코인 흔들림 상위 1/3 건너뛰기 (사용자 결정 2026-11-10, ct_prereg.txt)
+#   흔들림 = 4시간봉 84개(14일) 평균 진폭(ATR) ÷ 가격, 신호 봉 시각에 스캔한 코인끼리 순위.
+#   5년 재현: 6해 모두 나쁨(상위 1/3 −0.07R vs 나머지 +0.30R), 사이클 교차 계좌 같은 낙폭 A +57→+75% · B +83→+109%,
+#   문턱 25~50%·위험 ½도 모두 개선, 가짜(무작위 건너뜀) p 0.053. 실전 10-24~11-09: 8건 −0.40R vs 24건 +0.30R.
+#   건너뛴 신호는 SKIP_TRACK_FILE에 따로 추적(자동 방어·승격·코인당 한 포지션 계산에는 안 섞음).
+VOL_SKIP = True
+VOL_SKIP_FAMILIES = {"추세 눌림목"}
+VOL_SKIP_N = 84
+VOL_SKIP_Q = 2 / 3
 LONG_BIASES = ("long", "wait_breakout_long", "range_fade_long", "donchian_long", "st_long", "retest_long", "div_long", "pb_long",
                "diag_long", "wick_long")
 # v29 박스 돌파 진입: 직전 90봉(15일) 박스 · 거래량 20봉 평균의 2배 이상 · 경계 밖 1 ATR 이내 마감(멀리 튄 봉은 추격 안 함)
@@ -1308,6 +1318,10 @@ class CoinSetup:
     chop_value: Optional[float] = None  # v32.6: 신호 봉의 시장 출렁임 지수
     already_tracked: str = ""           # v30.2: 같은 코인·방향 추적 기록이 진행 중이면 그 설명
     opposite_tracked: str = ""          # v32.5: 같은 코인·반대 방향 추적 기록이 진행 중이면 그 설명 (코인당 한 포지션 → 새 추천 건너뜀)
+    vol_skip: bool = False              # v32.9: 추세 눌림목 × 흔들림 상위 1/3 → 건너뜀
+    vol_rank: Optional[float] = None    # v32.9: 신호 봉에서 스캔 코인 중 흔들림 순위(0~1, 높을수록 많이 흔들림)
+    vol_pct: Optional[float] = None     # v32.9: 4시간봉 평균 진폭 ÷ 가격
+    vol_line: Optional[float] = None    # v32.9: 그 봉의 상위 1/3 문턱
 
 
 _VOL_DIAG: Dict[str, Dict] = {}   # v29.2: 거래소별 현물 목록 상태(진단 표시용)
@@ -3074,6 +3088,46 @@ def chop_risk_mult(setup: "CoinSetup", info: Optional[Dict]) -> Tuple[float, Opt
     return (CHOP_RISK_MULT if v > CHOP_LIMIT else 1.0), v
 
 
+def coin_vol_info(loaded: Dict[str, tuple], n: int = VOL_SKIP_N, tail: int = 60) -> Optional[Dict]:
+    """v32.9: 스캔한 코인마다 '4시간봉 n개 평균 진폭(ATR) ÷ 가격'을 봉별로 계산하고, 같은 봉에서 코인끼리 순위(0~1)를 매김.
+    완성봉만 사용. 반환 {"value": DataFrame, "rank": DataFrame, "coins": 개수}"""
+    cols = {}
+    for sym, got in (loaded or {}).items():
+        try:
+            df = got[1] if got else None
+            if df is None or len(df) < 30:
+                continue
+            h, l, c = df["high"].astype(float), df["low"].astype(float), df["close"].astype(float)
+            pc = c.shift(1)
+            tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+            v = tr.rolling(n, min_periods=30).mean() / c
+            cols[sym] = pd.Series(v.to_numpy(), index=pd.to_datetime(df["ts"])).iloc[-tail:]
+        except Exception:
+            continue
+    if len(cols) < 10:
+        return None
+    V = pd.DataFrame(cols).sort_index()
+    return {"value": V, "rank": V.rank(axis=1, pct=True), "coins": len(cols)}
+
+
+def vol_skip_check(setup: "CoinSetup", info: Optional[Dict]) -> Tuple[bool, Optional[float], Optional[float], Optional[float]]:
+    """v32.9: 추세 눌림목이고 신호 봉에서 이 코인의 흔들림 순위가 상위 1/3이면 건너뜀. (건너뜀, 순위, 흔들림, 문턱)"""
+    if not VOL_SKIP or not info or SETUP_FAMILY.get(getattr(setup, "bias", ""), "") not in VOL_SKIP_FAMILIES:
+        return False, None, None, None
+    V, R = info["value"], info["rank"]
+    if setup.symbol not in V.columns or V.empty:
+        return False, None, None, None
+    ts = pd.Timestamp(setup.signal_ts) if getattr(setup, "signal_ts", "") else V.index[-1]
+    if ts not in V.index:
+        prior = V.index[V.index <= ts]
+        ts = prior[-1] if len(prior) else V.index[-1]
+    v, r = V.at[ts, setup.symbol], R.at[ts, setup.symbol]
+    if not np.isfinite(v) or not np.isfinite(r):
+        return False, None, None, None
+    line = float(V.loc[ts].dropna().quantile(VOL_SKIP_Q))
+    return bool(r > VOL_SKIP_Q), float(r), float(v), line
+
+
 def chop_text(info: Optional[Dict]) -> str:
     """화면 한 줄 설명"""
     if not info:
@@ -3408,7 +3462,7 @@ _FILE_LOCK = threading.RLock()
 
 def cloud_files() -> List[str]:
     return [TRACK_FILE, LAB_REF_FILE, LAB_CONFIG_FILE, MACRO_VAL_FILE, TRADE_LOG_FILE, HISTORY_FILE, PORT_LOG_FILE,
-            LT_LOG_FILE]
+            LT_LOG_FILE, SKIP_TRACK_FILE]
 
 
 def _check_cloud_config(tok: Optional[str], gid: Optional[str]) -> Optional[str]:
@@ -3499,7 +3553,7 @@ def cloud_restore() -> str:
                 continue
             CLOUD["remote_hashes"][name] = _sha(remote)
             local = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
-            if path == TRACK_FILE and local.strip():
+            if path in (TRACK_FILE, SKIP_TRACK_FILE) and local.strip():
                 text = _merge_tracks(local, remote)
             elif path == PORT_LOG_FILE and local.strip():
                 text = _merge_port_log(local, remote)
@@ -3536,7 +3590,8 @@ def cloud_pull(min_interval: float = 120.0) -> str:
     try:
         files = _gist_files()
         n = 0
-        for path, fn in ((TRACK_FILE, _merge_tracks), (PORT_LOG_FILE, _merge_port_log), (LT_LOG_FILE, _merge_lt_log)):
+        for path, fn in ((TRACK_FILE, _merge_tracks), (PORT_LOG_FILE, _merge_port_log), (LT_LOG_FILE, _merge_lt_log),
+                         (SKIP_TRACK_FILE, _merge_tracks)):
             name = os.path.basename(path)
             remote = files.get(name, "")
             if not remote.strip() or CLOUD["remote_hashes"].get(name) == _sha(remote):
@@ -3565,10 +3620,17 @@ def refresh_tracks(min_interval: float = 600.0, force: bool = False) -> str:
     CLOUD["last_track_refresh"] = now
     cloud_pull(0 if force else 120.0)
     tracks = load_tracks()
-    if not any(t["status"] in ACTIVE_TRACK for t in tracks):
+    skips = load_tracks(SKIP_TRACK_FILE)                   # v32.9: 건너뛴 눌림목 그림자 기록도 같이 갱신
+    act_main = any(t["status"] in ACTIVE_TRACK for t in tracks)
+    act_skip = any(t["status"] in ACTIVE_TRACK for t in skips)
+    if not act_main and not act_skip:
         return "none"
-    update_tracks(tracks, LAST_LOADED)
-    _save_tracks(tracks)
+    if act_main:
+        update_tracks(tracks, LAST_LOADED)
+        _save_tracks(tracks)
+    if act_skip:
+        update_tracks(skips, LAST_LOADED)
+        _save_tracks(skips, SKIP_TRACK_FILE)
     cloud_sync(force=True)
     return "updated"
 
@@ -3590,7 +3652,8 @@ def cloud_sync(force: bool = False, min_interval: float = 60.0) -> str:
     if not changed:
         return "same"
     try:
-        merge_fns = {TRACK_FILE: _merge_tracks, PORT_LOG_FILE: _merge_port_log, LT_LOG_FILE: _merge_lt_log}
+        merge_fns = {TRACK_FILE: _merge_tracks, PORT_LOG_FILE: _merge_port_log, LT_LOG_FILE: _merge_lt_log,
+                     SKIP_TRACK_FILE: _merge_tracks}
         if any(p in changed for p in merge_fns):
             gfiles = _gist_files()
             for path, fn in merge_fns.items():
@@ -3618,10 +3681,11 @@ def cloud_sync(force: bool = False, min_interval: float = 60.0) -> str:
         return "error"
 
 
-def load_tracks() -> List[Dict]:
-    """실전 추적 기록 읽기. 다른 버전·다른 기기에서 합쳐진 기록에 항목이 빠져 있어도 앱이 멈추지 않게 정리."""
+def load_tracks(path: str = TRACK_FILE) -> List[Dict]:
+    """실전 추적 기록 읽기. 다른 버전·다른 기기에서 합쳐진 기록에 항목이 빠져 있어도 앱이 멈추지 않게 정리.
+    v32.9: path = SKIP_TRACK_FILE이면 건너뛴 눌림목 그림자 기록."""
     try:
-        with open(TRACK_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             raw = json.load(f)
     except Exception:
         return []
@@ -3641,16 +3705,16 @@ def load_tracks() -> List[Dict]:
     return out
 
 
-def _save_tracks(tracks: List[Dict]) -> None:
+def _save_tracks(tracks: List[Dict], path: str = TRACK_FILE) -> None:
     """v30.2: 파일에 있는 기록과 합쳐서 저장 — 분석이 도는 사이 다른 화면·기기가 더한 기록을 지우지 않게.
     같은 신호는 더 진행된 상태(종료 > 보유 > 대기)·더 최근에 확인한 쪽이 남음. 기록을 지우는 기능은 없음."""
     try:
         with _FILE_LOCK:
             mine = json.dumps(tracks, ensure_ascii=False, default=str)
-            cur = open(TRACK_FILE, encoding="utf-8").read() if os.path.exists(TRACK_FILE) else ""
+            cur = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
             text = _merge_tracks(mine, cur) if cur.strip() else mine
             merged = json.loads(text)
-            with open(TRACK_FILE, "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(merged[-600:], f, ensure_ascii=False, default=str)
     except Exception as e:
         print(f"[warn] 추적 기록 저장 실패: {e}")
@@ -3944,6 +4008,19 @@ def _family_ref(ref: Optional[Dict], fam: str):
     return (v["mu"], v["sd"]) if v else None
 
 
+def skip_tracking_summary(skips: List[Dict], tracks: List[Dict]) -> Dict:
+    """v32.9: 건너뛴 눌림목 그림자 기록 vs 같은 기간 실제 추천된 눌림목 비교."""
+    def part(v):
+        c = [t["R"] for t in v if t["status"] == "종료" and t.get("R") is not None]
+        o = [t["live"]["R_now"] for t in v if t["status"] == "보유" and t.get("live") and t["live"].get("R_now") is not None]
+        return {"n": len(v), "closed": len(c), "sumR": float(np.sum(c)) if c else 0.0, "avgR": float(np.mean(c)) if c else None,
+                "stops": sum(1 for t in v if t["status"] == "종료" and "손절" in str(t.get("reason", "")) and "추적" not in str(t.get("reason", ""))),
+                "open": len(o), "openR": float(np.sum(o)) if o else 0.0}
+    t0 = min((str(t.get("created", "")) for t in skips), default="")
+    peer = [t for t in tracks if t.get("family") in VOL_SKIP_FAMILIES and str(t.get("created", "")) >= t0] if t0 else []
+    return {"skip": part(skips), "peer": part(peer), "since": t0}
+
+
 def family_promoted(tracks: List[Dict], ref: Optional[Dict], fam: str) -> bool:
     """시험 운용 승격: 실전 추적 종료 30건 이상, 최근 30건 평균이 플러스이면서 기준선 정상 범위 안."""
     closed = [t["R"] for t in tracks if t["family"] == fam and t["status"] == "종료" and t.get("R") is not None]
@@ -4046,6 +4123,11 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         chop_info = market_chop_info(LAST_LOADED)
     except Exception as e:
         print(f"[warn] 시장 출렁임 계산 실패: {e}")
+    vol_info = None
+    try:  # v32.9 코인 흔들림 순위(추세 눌림목 건너뛰기 규칙)
+        vol_info = coin_vol_info(LAST_LOADED)
+    except Exception as e:
+        print(f"[warn] 흔들림 순위 계산 실패: {e}")
     # v30.2: 같은 코인·방향 기록이 진행 중이면 새 추천은 추적에 안 들어감(코인당 한 포지션) → 카드에 알려줌
     act_ = {(t["symbol"], t["direction"]): t for t in tracks if t["status"] in ACTIVE_TRACK}
     for x in all_setups:
@@ -4084,6 +4166,9 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         if chm_ != 1.0:
             x.chop_half = True
             x.risk_mult *= chm_
+        x.vol_skip, x.vol_rank, x.vol_pct, x.vol_line = vol_skip_check(x, vol_info)   # v32.9
+    skipped = [x for x in all_setups if x.vol_skip]            # v32.9: 추천에서 빼고 그림자 기록만
+    all_setups = [x for x in all_setups if not x.vol_skip]
     active = [x for x in all_setups if x.health != "paused"]
     paused = [x for x in all_setups if x.health == "paused"]
     setups = cap_correlated_exposure(active, risk_cfg) if active else []
@@ -4091,6 +4176,7 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
     cs = stats.get("coin_status") or {}
     fin_ids = {id(x) for x in setups}
     kept_ids = {id(x) for x in all_setups}
+    skip_ids = {id(x) for x in skipped}
     for x in pre_macro:
         d = cs.get(x.symbol)
         if d is None:
@@ -4098,6 +4184,8 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         fam = SETUP_FAMILY.get(x.bias, x.bias)
         if id(x) in fin_ids:
             tag = f"✅ 추천 ({fam})"
+        elif id(x) in skip_ids:
+            tag = f"흔들림 상위 1/3이라 건너뜀 ({fam} · 순위 {x.vol_rank:.0%})"
         elif id(x) not in kept_ids:
             tag = f"거시 흐름과 반대라 제외 ({fam})"
         elif x.health == "paused":
@@ -4115,12 +4203,20 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         "거시 필터": ("켬" if MACRO_FILTER else "끔") + (f"({macro_info['blocked_side']} 제외 중)" if macro_info.get("blocked_side") else ""),
         "자동 방어": ("켬" if AUTO_DEFENSE else "끔") + (f"(중지: {'·'.join(paused_f)})" if paused_f else ""),
         "손실 한도": breaker or "정상", "동시 추천 최대": risk_cfg.max_concurrent_setups,
+        "흔들림 건너뛰기": ("켬(눌림목 상위 1/3)" if VOL_SKIP else "끔") + (f" · 건너뜀 {len(skipped)}" if skipped else ""),
     }
     try:  # 새 추천 추적 (자동 중지된 신호도 계속 추적해야 성과 회복을 알 수 있음)
         track_new_setups(setups + paused, tracks)
         _save_tracks(tracks)
     except Exception as e:
         print(f"[warn] 실전 추적 저장 실패: {e}")
+    try:  # v32.9: 건너뛴 눌림목은 따로 그림자 기록 (나중에 '건너뛴 게 맞았나' 확인)
+        skips = load_tracks(SKIP_TRACK_FILE)
+        update_tracks(skips, LAST_LOADED)
+        track_new_setups(skipped, skips)
+        _save_tracks(skips, SKIP_TRACK_FILE)
+    except Exception as e:
+        print(f"[warn] 건너뛴 신호 기록 저장 실패: {e}")
     direction: Dict = {}
     try:  # v29.9 기간별 거시 방향 (표시용 — 추천 규칙에는 안 씀)
         bd_ = drop_unclosed(fetch_ohlcv("bitget", f"BTC/{QUOTE}", "1d", 300), "1d")
@@ -4133,6 +4229,7 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
     except Exception as e:
         print(f"[warn] FOMC 참고 계산 실패: {e}")
     return {"regime": regime, "breaker": breaker, "setups": setups, "all_setups": all_setups, "health": health,
+            "vol_skipped": skipped,
             "direction": direction, "event_drift": event_drift, "market_chop": chop_info,
             "trial": {fam: ("승격" if promoted.get(fam) else "시험 운용") for fam in TRIAL_FAMILIES},
             "new_families": {**{fam: ("정상 위험" if promoted.get(fam) else "위험 절반") for fam in NEW_FAMILY_RISK},
