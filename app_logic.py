@@ -39,6 +39,10 @@ BIAS_INFO = {
     "pb_short": ("short", "숏", "📉 반등 숏(하락 추세 속 반등 → 20EMA 아래로 재마감) · 시장가"),
     "diag_long": ("long", "롱", "🧪 상승 빗각 지지(일봉 · 한국 09시 마감) · 시장가"),
     "wick_long": ("long", "롱", "🧪 아래꼬리 2연속(일봉 · 한국 09시 마감) · 시장가"),
+    "spring_long": ("long", "롱", "👻 스프링(지지 살짝 이탈 → 복귀 → 박스 상단 돌파 확인)"),
+    "spring_short": ("short", "숏", "👻 거울 스프링(저항 살짝 돌파 → 복귀 → 박스 하단 이탈 확인)"),
+    "rx_long": ("long", "롱", "👻 20/50 눌림 재교차(50선 상승 중 두 번째 골든크로스)"),
+    "rx_short": ("short", "숏", "👻 20/50 반등 재교차(50선 하락 중 두 번째 데드크로스)"),
 }
 FAMILY_TAG = {"돌파 후 되돌림": "🔁 돌파 후 되돌림", "위치 다이버전스": "📐 위치 다이버전스", "추세 눌림목": "📈 추세 눌림목",
               "빗각 지지": "🧪 빗각 지지", "아래꼬리 연속": "🧪 아래꼬리 연속"}
@@ -393,6 +397,20 @@ def skip_line(setup) -> str:
            if vr is not None and vp is not None and vl is not None else "흔들림 상위 1/3")
     return (f'<div class="dead"><b>{html.escape(setup.symbol)}</b> {side_kr} · {html.escape(sub)} '
             f'<span class="k">({why} · 진입 {fmt_price(setup.entry_price)} · 손절 {fmt_price(setup.sl)})</span></div>')
+
+
+def shadow_line(setup) -> str:
+    """v33: 👻 그림자 기록 신호 한 줄 (진입 대상 아님). 신호 봉 마감 시각(한국)·진입·손절·목표1."""
+    import pandas as pd
+    side, side_kr, sub = side_info(setup.bias)
+    try:
+        when = (pd.Timestamp(setup.signal_ts) + pd.Timedelta("4h") + pd.Timedelta(hours=9)).strftime("%m-%d %H:%M")
+    except Exception:
+        when = "-"
+    note = html.escape(str(setup.entry_note).split(" · 👻")[0])
+    return (f'<div class="dead"><b>{html.escape(setup.symbol)}</b> {side_kr} · {html.escape(sub)} '
+            f'<span class="k">(신호 봉 마감 {when} · 진입 {fmt_price(setup.entry_price)} · 손절 {fmt_price(setup.sl)} · '
+            f'목표1 {fmt_price(setup.tp1)} 뒤 추적)<br>{note}</span></div>')
 
 
 PORT_ICON = {"신규 진입": "🟢", "비중 조정": "🔄", "정리": "🔴", "유지": "⚪"}

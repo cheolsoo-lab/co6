@@ -42,7 +42,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-11-10 v32.9"          # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-11-12 v33"          # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -76,6 +76,8 @@ EXIT_RULES = {
     "위치 다이버전스": {"stop_atr": 0.0, "tp_R": 3.0, "frac": 0.0, "trail": 0.75, "hold": 60},   # v29 기본 꺼짐(5년 교차 검증 탈락)
     "빗각 지지": {"stop_atr": 0.0, "tp_R": 5.0, "frac": 0.0, "trail": 1.5, "hold": 180},   # v31 시험 운용(손절 = 진입가 − 2 일봉 ATR)
     "아래꼬리 연속": {"stop_atr": 0.0, "tp_R": 5.0, "frac": 0.0, "trail": 3.0, "hold": 180},   # v32 시험 운용(손절 = 진입가 − 2 일봉 ATR)
+    "스프링": {"stop_atr": 0.5, "tp_box": 2.0, "frac": 0.0, "trail": 0.75, "hold": 60},      # v33 👻 그림자 기록만
+    "20/50 재교차": {"stop_atr": 0.5, "tp_R": 2.0, "frac": 0.0, "trail": 0.75, "hold": 60},   # v33 👻 그림자 기록만
 }
 # 새로 넣은 매매법은 위험 절반으로 시작 → 실전 추적 30건 평균이 플러스(기준선 안)면 자동으로 정상 위험
 NEW_FAMILY_RISK = {"돌파 후 되돌림": 0.5, "위치 다이버전스": 0.5}
@@ -134,8 +136,26 @@ VOL_SKIP = True
 VOL_SKIP_FAMILIES = {"추세 눌림목"}
 VOL_SKIP_N = 84
 VOL_SKIP_Q = 2 / 3
+# v33 👻 그림자 기록(진입 대상 아님 — 결과만 자동 추적, 사용자 결정 2026-11-12). 실전에서 통하는지 확인용.
+#   스프링(박스 상단 확인): 직전 60봉 박스(높이 ≤ 8 ATR) 지지를 살짝 이탈 → 3봉 안에 박스 안으로 종가 복귀 → 20봉 안에
+#     박스 상단 위 종가(진입). 이탈이 박스 하단 − 3 ATR보다 깊으면 제외. 손절 = 스프링 저점 − 0.5 ATR(진입가에서 최소 1 ATR),
+#     목표1 = 박스 상단 + 박스 높이 2배 → 손절을 진입가로 올리고 최고가 − 0.75 ATR 추적, 최대 60봉. 숏은 거울.
+#     (sw_prereg 1위: Bitget A 105건 +0.24R · B 394건 +0.20R · 신호 시점 밀기 30번 통과. 원래 스크립트가 사라져 README 정의로
+#      다시 만듦 — 해석이 갈리는 곳은 거래 수가 가까운 쪽으로 고정, 손절폭 30% 초과 제외: 재구성 A 111건 +0.16R · B 376건 +0.19R)
+#   20/50 재교차: 단순이평 20이 50을 위로 교차, 50선 3봉 기울기 > 0, 직전 60봉 안에 앞선 같은 방향 교차가 있었음(두 번째 교차).
+#     손절 = 직전 10봉 최저 − 0.5 ATR, 목표1 = 2R → 0.75 ATR 추적, 최대 60봉. 숏은 거울.
+#     (ma2_prereg 1위: A 390건 +0.29R · B 1,174건 +0.22R · 신호 시점 밀기 30번 통과. 재구성 A 484건 +0.29R · B 1,499건 +0.19R)
+#   판단(미리 정함): 유형별로 끝난 기록 30건이 쌓이면 평균 R > 0이면 '위험 ¼ 시험 운용' 제안, 0 이하면 기록 중단 제안.
+SHADOW_ON = True
+SHADOW_TRACK_FILE = "shadow_tracking.json"
+SHADOW_LOOKBACK = 18          # 최근 18봉(3일) 안 신호까지 기록 — 앱을 하루 한두 번만 열어도 빠지지 않게
+SHADOW_FAMILIES = ("스프링", "20/50 재교차")
+SHADOW_DECIDE_N = 30
+SHADOW_MAX_RISK = 0.3         # 손절폭이 진입가의 30%를 넘으면 제외(연구 라이브러리와 같은 기준)
+SPRING_BOX, SPRING_MAX_H, SPRING_BACK, SPRING_WAIT, SPRING_DEEP = 60, 8.0, 3, 20, 3.0
+RX_FAST, RX_SLOW, RX_SLOPE, RX_PRIOR = 20, 50, 3, 60
 LONG_BIASES = ("long", "wait_breakout_long", "range_fade_long", "donchian_long", "st_long", "retest_long", "div_long", "pb_long",
-               "diag_long", "wick_long")
+               "diag_long", "wick_long", "spring_long", "rx_long")
 # v29 박스 돌파 진입: 직전 90봉(15일) 박스 · 거래량 20봉 평균의 2배 이상 · 경계 밖 1 ATR 이내 마감(멀리 튄 봉은 추격 안 함)
 BOX_LOOKBACK = 90
 BOX_VOL_MIN = 2.0
@@ -3128,6 +3148,120 @@ def vol_skip_check(setup: "CoinSetup", info: Optional[Dict]) -> Tuple[bool, Opti
     return bool(r > VOL_SKIP_Q), float(r), float(v), line
 
 
+def shadow_signals(df: pd.DataFrame, lookback: int = SHADOW_LOOKBACK) -> List[Dict]:
+    """v33 👻 그림자 기록 신호(스프링 · 20/50 재교차)를 최근 lookback개 완성봉에서 찾음. 숏은 가격을 뒤집은 거울."""
+    d = df.reset_index(drop=True)
+    n = len(d)
+    if n < SPRING_BOX + RX_SLOW + 30:
+        return []
+    h, l, c = (d[k].to_numpy(float) for k in ("high", "low", "close"))
+    a = _atr_array(h, l, c)
+    lo_i = n - lookback
+    out: List[Dict] = []
+    # 스프링(박스 상단 확인)
+    HH = pd.Series(h).rolling(SPRING_BOX).max().shift(1).to_numpy()
+    LL = pd.Series(l).rolling(SPRING_BOX).min().shift(1).to_numpy()
+    seen = set()
+    for t in range(max(SPRING_BOX + 20, lo_i - SPRING_WAIT - SPRING_BACK), n):
+        if not (np.isfinite(a[t]) and np.isfinite(HH[t]) and np.isfinite(LL[t])) or HH[t] - LL[t] > SPRING_MAX_H * a[t]:
+            continue
+        for sgn in (1, -1):
+            top, bot = (HH[t], LL[t]) if sgn > 0 else (-LL[t], -HH[t])
+            cc, ll = (c, l) if sgn > 0 else (-c, -h)
+            if not ll[t] < bot:
+                continue
+            r = next((j for j in range(t, min(n, t + SPRING_BACK)) if cc[j] > bot), None)
+            if r is None:
+                continue
+            e = next((j for j in range(r, min(n, r + SPRING_WAIT + 1)) if cc[j] > top), None)
+            if e is None or e < lo_i or (sgn, e) in seen or not np.isfinite(a[e]):
+                continue
+            if ll[t:e + 1].min() < bot - SPRING_DEEP * a[t]:
+                continue
+            sp, hgt, en = ll[t:r + 1].min(), top - bot, cc[e]
+            sl = min(sp - 0.5 * a[e], en - MIN_STOP_ATR * a[e])
+            tp1 = top + EXIT_RULES["스프링"]["tp_box"] * hgt
+            if not sl < en < tp1 or en - sl > SHADOW_MAX_RISK * abs(en):   # 연구와 같이 손절폭 30% 넘는 신호(급등 신규 코인 등)는 제외
+                continue
+            seen.add((sgn, e))
+            out.append({"fam": "스프링", "bias": "spring_long" if sgn > 0 else "spring_short", "i": e,
+                        "entry": sgn * en, "sl": sgn * sl, "tp1": sgn * tp1, "atr": float(a[e]),
+                        "box_hi": float(HH[t]), "box_lo": float(LL[t]), "spring": float(sgn * sp)})
+    # 20/50 재교차
+    f = pd.Series(c).rolling(RX_FAST).mean().to_numpy()
+    s = pd.Series(c).rolling(RX_SLOW).mean().to_numpy()
+    fp, sp_ = np.r_[np.nan, f[:-1]], np.r_[np.nan, s[:-1]]
+    up = (f > s) & (fp <= sp_)
+    dn = (f < s) & (fp >= sp_)
+    for t in range(max(lo_i, RX_SLOW + RX_PRIOR), n):
+        if not np.isfinite(a[t]):
+            continue
+        for sgn, X in ((1, up), (-1, dn)):
+            if not X[t] or not sgn * (s[t] - s[t - RX_SLOPE]) > 0 or not X[t - RX_PRIOR:t].any():
+                continue
+            en = c[t]
+            sl = (l[t - 9:t + 1].min() - 0.5 * a[t]) if sgn > 0 else (h[t - 9:t + 1].max() + 0.5 * a[t])
+            risk = abs(en - sl)
+            if risk <= 0 or risk > SHADOW_MAX_RISK * en:
+                continue
+            prev = int(np.where(X[t - RX_PRIOR:t])[0][-1]) + t - RX_PRIOR
+            out.append({"fam": "20/50 재교차", "bias": "rx_long" if sgn > 0 else "rx_short", "i": t, "entry": en, "sl": sl,
+                        "tp1": en + sgn * EXIT_RULES["20/50 재교차"]["tp_R"] * risk, "atr": float(a[t]),
+                        "ma_f": float(f[t]), "ma_s": float(s[t]), "prev_bars": t - prev})
+    for x in out:
+        x["ts"] = d["ts"].iloc[x["i"]]
+    return out
+
+
+def build_shadow_setups(loaded: Dict[str, tuple]) -> List["CoinSetup"]:
+    """v33: 스캔한 코인(BTC 제외)의 4시간봉에서 그림자 기록 신호를 찾아 CoinSetup으로 (진입 대상 아님)."""
+    res: List[CoinSetup] = []
+    for sym, (src, df) in (loaded or {}).items():
+        try:
+            if coin_group(sym) == "BTC" or df is None or len(df) < 200:
+                continue
+            d = drop_unclosed(df)
+            price = float(d["close"].iloc[-1])
+            for g in shadow_signals(d):
+                long_side = g["bias"].endswith("_long")
+                if g["fam"] == "스프링":
+                    note = (f"박스 {fmt_range(g['box_lo'])}~{fmt_range(g['box_hi'])}(60봉) "
+                            f"{'지지 살짝 이탈' if long_side else '저항 살짝 돌파'}({fmt_range(g['spring'])}) → 복귀 → "
+                            f"{'상단 돌파' if long_side else '하단 이탈'} 확인 종가")
+                else:
+                    note = (f"20선 {fmt_range(g['ma_f'])} / 50선 {fmt_range(g['ma_s'])} — 50선 {'상승' if long_side else '하락'} 중 "
+                            f"두 번째 {'골든' if long_side else '데드'}크로스(앞선 교차 {g['prev_bars']}봉 전)")
+                x = CoinSetup(sym, src, g["bias"], note + " · 👻 그림자 기록(진입 대상 아님)", float(g["entry"]), price,
+                              float(g["tp1"]), float(g["tp1"] + (g["tp1"] - g["entry"])), float(g["sl"]),
+                              abs(g["tp1"] - g["entry"]) / abs(g["entry"] - g["sl"]), False, False, 0.0, None,
+                              atr=float(g["atr"]), live_status="ready")
+                x.market_entry, x.signal_ts, x.group = True, str(g["ts"]), coin_group(sym)
+                set_exit_rule(x, g["fam"])
+                res.append(x)
+        except Exception as e:
+            print(f"[warn] 그림자 신호 계산 실패 {sym}: {e}")
+    res.sort(key=lambda x: str(x.signal_ts), reverse=True)
+    return res
+
+
+def shadow_tracking_summary(shadows: List[Dict]) -> Dict[str, Dict]:
+    """v33: 그림자 기록 유형별 요약(끝난 건 평균 R·합·승률·손절 수, 보유 중 지금 R, 30건 판단)."""
+    out: Dict[str, Dict] = {}
+    for fam in SHADOW_FAMILIES:
+        v = [t for t in shadows if t.get("family") == fam]
+        c = [t["R"] for t in v if t["status"] == "종료" and t.get("R") is not None]
+        o = [t["live"]["R_now"] for t in v if t["status"] == "보유" and t.get("live") and t["live"].get("R_now") is not None]
+        out[fam] = {"n": len(v), "closed": len(c), "sumR": float(np.sum(c)) if c else 0.0,
+                    "avgR": float(np.mean(c)) if c else None, "win": float(np.mean(np.array(c) > 0)) if c else None,
+                    "stops": sum(1 for t in v if t["status"] == "종료" and "손절" in str(t.get("reason", ""))
+                                 and "추적" not in str(t.get("reason", ""))),
+                    "open": len(o), "openR": float(np.sum(o)) if o else 0.0,
+                    "long": sum(1 for t in v if t.get("direction") == "long"),
+                    "short": sum(1 for t in v if t.get("direction") == "short"),
+                    "decision": (None if len(c) < SHADOW_DECIDE_N else ("시험 운용 제안" if np.mean(c) > 0 else "기록 중단 제안"))}
+    return out
+
+
 def chop_text(info: Optional[Dict]) -> str:
     """화면 한 줄 설명"""
     if not info:
@@ -3462,7 +3596,7 @@ _FILE_LOCK = threading.RLock()
 
 def cloud_files() -> List[str]:
     return [TRACK_FILE, LAB_REF_FILE, LAB_CONFIG_FILE, MACRO_VAL_FILE, TRADE_LOG_FILE, HISTORY_FILE, PORT_LOG_FILE,
-            LT_LOG_FILE, SKIP_TRACK_FILE]
+            LT_LOG_FILE, SKIP_TRACK_FILE, SHADOW_TRACK_FILE]
 
 
 def _check_cloud_config(tok: Optional[str], gid: Optional[str]) -> Optional[str]:
@@ -3553,7 +3687,7 @@ def cloud_restore() -> str:
                 continue
             CLOUD["remote_hashes"][name] = _sha(remote)
             local = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
-            if path in (TRACK_FILE, SKIP_TRACK_FILE) and local.strip():
+            if path in (TRACK_FILE, SKIP_TRACK_FILE, SHADOW_TRACK_FILE) and local.strip():
                 text = _merge_tracks(local, remote)
             elif path == PORT_LOG_FILE and local.strip():
                 text = _merge_port_log(local, remote)
@@ -3591,7 +3725,7 @@ def cloud_pull(min_interval: float = 120.0) -> str:
         files = _gist_files()
         n = 0
         for path, fn in ((TRACK_FILE, _merge_tracks), (PORT_LOG_FILE, _merge_port_log), (LT_LOG_FILE, _merge_lt_log),
-                         (SKIP_TRACK_FILE, _merge_tracks)):
+                         (SKIP_TRACK_FILE, _merge_tracks), (SHADOW_TRACK_FILE, _merge_tracks)):
             name = os.path.basename(path)
             remote = files.get(name, "")
             if not remote.strip() or CLOUD["remote_hashes"].get(name) == _sha(remote):
@@ -3621,9 +3755,11 @@ def refresh_tracks(min_interval: float = 600.0, force: bool = False) -> str:
     cloud_pull(0 if force else 120.0)
     tracks = load_tracks()
     skips = load_tracks(SKIP_TRACK_FILE)                   # v32.9: 건너뛴 눌림목 그림자 기록도 같이 갱신
+    shadows = load_tracks(SHADOW_TRACK_FILE)               # v33: 👻 그림자 기록(스프링 · 20/50 재교차)도
     act_main = any(t["status"] in ACTIVE_TRACK for t in tracks)
     act_skip = any(t["status"] in ACTIVE_TRACK for t in skips)
-    if not act_main and not act_skip:
+    act_sh = any(t["status"] in ACTIVE_TRACK for t in shadows)
+    if not act_main and not act_skip and not act_sh:
         return "none"
     if act_main:
         update_tracks(tracks, LAST_LOADED)
@@ -3631,6 +3767,9 @@ def refresh_tracks(min_interval: float = 600.0, force: bool = False) -> str:
     if act_skip:
         update_tracks(skips, LAST_LOADED)
         _save_tracks(skips, SKIP_TRACK_FILE)
+    if act_sh:
+        update_tracks(shadows, LAST_LOADED)
+        _save_tracks(shadows, SHADOW_TRACK_FILE)
     cloud_sync(force=True)
     return "updated"
 
@@ -3653,7 +3792,7 @@ def cloud_sync(force: bool = False, min_interval: float = 60.0) -> str:
         return "same"
     try:
         merge_fns = {TRACK_FILE: _merge_tracks, PORT_LOG_FILE: _merge_port_log, LT_LOG_FILE: _merge_lt_log,
-                     SKIP_TRACK_FILE: _merge_tracks}
+                     SKIP_TRACK_FILE: _merge_tracks, SHADOW_TRACK_FILE: _merge_tracks}
         if any(p in changed for p in merge_fns):
             gfiles = _gist_files()
             for path, fn in merge_fns.items():
@@ -3720,19 +3859,22 @@ def _save_tracks(tracks: List[Dict], path: str = TRACK_FILE) -> None:
         print(f"[warn] 추적 기록 저장 실패: {e}")
 
 
-def track_new_setups(setups: List[CoinSetup], tracks: List[Dict]) -> int:
-    """새 추천을 추적 기록에 추가 (같은 신호는 한 번만, 같은 코인·방향이 진행 중이면 추가 안 함)."""
+def track_new_setups(setups: List[CoinSetup], tracks: List[Dict], per_family: bool = False) -> int:
+    """새 추천을 추적 기록에 추가 (같은 신호는 한 번만, 같은 코인·방향이 진행 중이면 추가 안 함).
+    v33: per_family=True면 '유형별로' 코인당 한 포지션(그림자 기록 — 스프링과 20/50 재교차를 서로 막지 않게)."""
     keys = {t["key"] for t in tracks}
     # v32.5: 방향과 상관없이 코인당 한 포지션 (5년 검증·계좌 모의와 같은 규칙). 예전엔 같은 방향만 막아서
     # 롱 진행 중에 같은 코인 숏 추천이 나오면 둘 다 기록됐음(양방향 동시 보유)
-    active = {t["symbol"] for t in tracks if t["status"] in ACTIVE_TRACK}
+    slot = (lambda sym, fam: (sym, fam)) if per_family else (lambda sym, fam: sym)
+    active = {slot(t["symbol"], t.get("family")) for t in tracks if t["status"] in ACTIVE_TRACK}
     added = 0
-    for x in setups:
+    for x in sorted(setups, key=lambda z: str(z.signal_ts)) if per_family else setups:
         if not x.signal_ts:
             continue
         direction = "long" if x.bias in LONG_BIASES else "short"
         key = f"{x.symbol}|{x.bias}|{x.signal_ts}"
-        if key in keys or x.symbol in active:
+        sl_ = slot(x.symbol, SETUP_FAMILY.get(x.bias, x.bias))
+        if key in keys or sl_ in active:
             continue
         tracks.append({"key": key, "symbol": x.symbol, "exchange": x.exchange, "bias": x.bias,
                        "family": SETUP_FAMILY.get(x.bias, x.bias), "direction": direction,
@@ -3744,7 +3886,7 @@ def track_new_setups(setups: List[CoinSetup], tracks: List[Dict]) -> int:
                        "frac": x.exit_frac, "trail": x.exit_trail, "hold": x.max_hold,
                        "perp": x.perp_symbol or "", "mult": int(x.perp_mult or 1),
                        "risk_mult": float(getattr(x, "risk_mult", 1.0) or 1.0)})
-        active.add(x.symbol)
+        active.add(sl_)
         added += 1
     return added
 
@@ -4205,6 +4347,19 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         "손실 한도": breaker or "정상", "동시 추천 최대": risk_cfg.max_concurrent_setups,
         "흔들림 건너뛰기": ("켬(눌림목 상위 1/3)" if VOL_SKIP else "끔") + (f" · 건너뜀 {len(skipped)}" if skipped else ""),
     }
+    shadow_new: List[CoinSetup] = []
+    if SHADOW_ON:
+        try:  # v33: 👻 그림자 기록(스프링 · 20/50 재교차) — 진입 대상 아님, '들어갔다면' 결과만 따로 추적
+            shadow_new = build_shadow_setups(LAST_LOADED)
+            shs = load_tracks(SHADOW_TRACK_FILE)
+            for _ in range(2):   # 최근 3일 안에 같은 코인 신호가 둘이면: 앞 기록이 끝났는지 계산한 뒤 다음 것을 넣음
+                update_tracks(shs, LAST_LOADED)
+                track_new_setups(shadow_new, shs, per_family=True)
+            update_tracks(shs, LAST_LOADED)
+            _save_tracks(shs, SHADOW_TRACK_FILE)
+        except Exception as e:
+            print(f"[warn] 그림자 기록 저장 실패: {e}")
+        stats["fingerprint"]["그림자 기록"] = f"스프링·20/50 재교차(진입 대상 아님) · 최근 3일 신호 {len(shadow_new)}"
     try:  # 새 추천 추적 (자동 중지된 신호도 계속 추적해야 성과 회복을 알 수 있음)
         track_new_setups(setups + paused, tracks)
         _save_tracks(tracks)
@@ -4229,7 +4384,7 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
     except Exception as e:
         print(f"[warn] FOMC 참고 계산 실패: {e}")
     return {"regime": regime, "breaker": breaker, "setups": setups, "all_setups": all_setups, "health": health,
-            "vol_skipped": skipped,
+            "vol_skipped": skipped, "shadow_new": shadow_new,
             "direction": direction, "event_drift": event_drift, "market_chop": chop_info,
             "trial": {fam: ("승격" if promoted.get(fam) else "시험 운용") for fam in TRIAL_FAMILIES},
             "new_families": {**{fam: ("정상 위험" if promoted.get(fam) else "위험 절반") for fam in NEW_FAMILY_RISK},
@@ -4304,7 +4459,8 @@ SETUP_FAMILY = {"long": "추세", "short": "추세", "wait_breakout_long": "돌�
                 "retest_long": "돌파 후 되돌림", "retest_short": "돌파 후 되돌림",
                 "div_long": "위치 다이버전스", "div_short": "위치 다이버전스",
                 "pb_long": "추세 눌림목", "pb_short": "추세 눌림목", "diag_long": "빗각 지지",
-                "wick_long": "아래꼬리 연속"}
+                "wick_long": "아래꼬리 연속",
+                "spring_long": "스프링", "spring_short": "스프링", "rx_long": "20/50 재교차", "rx_short": "20/50 재교차"}
 
 
 def _htf_lookup(df: pd.DataFrame, htf_df: Optional[pd.DataFrame]):

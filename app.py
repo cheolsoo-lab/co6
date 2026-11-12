@@ -63,7 +63,7 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-11-10 v32.9"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
+APP_VERSION = "2026-11-12 v33"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
 st.title("▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
@@ -838,6 +838,13 @@ def recommendations() -> None:
                        "실전 10-24~11-09에도 8건 −0.40R(나머지 +0.30R)이었어요. 결과는 따로 계속 기록해요(아래 '건너뛴 눌림목 기록').")
             for s in skipped_:
                 st.markdown(L.skip_line(s), unsafe_allow_html=True)
+    shadow_ = r.get("shadow_new") or []                  # v33 👻 그림자 기록(스프링 · 20/50 재교차)
+    if shadow_:
+        with st.expander(f"👻 그림자 기록 신호 ({len(shadow_)}) — 스프링 · 20/50 재교차, 진입 대상 아님"):
+            st.caption("과거 검증에서 플러스였지만 아직 추천 규칙에 넣지 않은 두 매매법이에요. 최근 3일(4시간봉 18개) 안에 나온 신호를 "
+                       "'봉 마감 종가에 들어갔다면'으로 자동 기록해요. 돈은 걸지 마세요 — 실전 결과 확인용이에요(아래 '그림자 기록').")
+            for s in shadow_[:40]:
+                st.markdown(L.shadow_line(s), unsafe_allow_html=True)
     watch = (r.get("filter_stats") or {}).get("watchlist") or []
     if watch:
         with st.expander(f"👀 돌파 임박 관찰 ({len(watch)}) — 아직 진입 신호 아님", expanded=not alive):
@@ -1277,6 +1284,35 @@ if _skips:
                    "청산": t.get("reason", "")}
                   for t in sorted(_skips, key=lambda t: str(t["signal_ts"]), reverse=True)[:60]]
         st.dataframe(pd.DataFrame(rows_s), hide_index=True, use_container_width=True)
+
+# v33: 👻 그림자 기록 — 스프링(박스 상단 확인) · 20/50 눌림 재교차, 진입 대상 아님
+_shadows = cmr.load_tracks(cmr.SHADOW_TRACK_FILE)
+with st.expander(f"👻 그림자 기록 ({len(_shadows)}건 · 스프링 · 20/50 재교차 · 들어갔다면)"):
+    if not _shadows:
+        st.caption("아직 기록이 없어요. 분석을 실행하면 최근 3일 신호부터 쌓여요.")
+    else:
+        sm_sh = cmr.shadow_tracking_summary(_shadows)
+        ref_ = {"스프링": "과거 재구성 거래당 +0.16R(2021~23) · +0.19R(2024~)", "20/50 재교차": "과거 재구성 거래당 +0.29R(2021~23) · +0.19R(2024~)"}
+        lines_ = []
+        for fam_, d_ in sm_sh.items():
+            body_ = (f"끝남 {d_['closed']}/{cmr.SHADOW_DECIDE_N}건 합 {d_['sumR']:+.2f}R"
+                     + (f" (평균 {d_['avgR']:+.2f}R, 승률 {d_['win']:.0%}, 손절 {d_['stops']}건)" if d_["avgR"] is not None else "")
+                     + f" · 보유 {d_['open']}건 지금 {d_['openR']:+.2f}R · 롱 {d_['long']} 숏 {d_['short']}")
+            if d_["decision"]:
+                body_ += f" → **{d_['decision']}**"
+            lines_.append(f"- **{fam_}**: {body_}  \n  <span style='font-size:0.8em;color:#888'>{ref_[fam_]}</span>")
+        st.markdown("\n".join(lines_), unsafe_allow_html=True)
+        st.caption("판단 기준(미리 정함): 유형별로 끝난 기록이 30건 쌓였을 때 평균 R이 0보다 크면 '위험 ¼ 시험 운용' 제안, "
+                   "0 이하면 기록 중단 제안. 이 기록은 실전 추천·자동 방어·승격·코인당 한 포지션 계산에 섞지 않아요"
+                   "(그림자끼리는 유형별로 코인당 한 포지션).")
+        bar_h = pd.Timedelta(cmr.TIMEFRAME)
+        rows_h = [{"유형": t.get("family", ""), "코인": t["symbol"].split("/")[0], "방향": "롱" if t["direction"] == "long" else "숏",
+                   "신호 봉 마감(한국)": (pd.Timestamp(t["signal_ts"]) + bar_h + pd.Timedelta(hours=9)).strftime("%m-%d %H:%M"),
+                   "상태": t["status"], "R": t.get("R") if t["status"] == "종료" else (
+                       round(t["live"]["R_now"], 2) if t.get("live") and t["live"].get("R_now") is not None else None),
+                   "청산": t.get("reason", "")}
+                  for t in sorted(_shadows, key=lambda t: str(t["signal_ts"]), reverse=True)[:80]]
+        st.dataframe(pd.DataFrame(rows_h), hide_index=True, use_container_width=True)
 
 # v30.2: 추천받아 들어갔는데 추적에 안 보일 때 — 최근 3일 신호를 지금 규칙으로 다시 찾아 넣기
 with st.expander("🔧 추적에 안 보이는 추천 다시 찾기"):
