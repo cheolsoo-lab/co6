@@ -223,10 +223,13 @@ def exec_rules(setup) -> list:
     else:
         out.append(f"보유 기한: 지금 진입하면 {now_kst + pd.Timedelta(days=hold_days):%m-%d}까지 — "
                    f"목표1·손절 모두 안 닿으면 그날 정리")
-    if getattr(setup, "atr", 0) and setup.tp1:
+    if setup.tp1 is not None and setup.tp1 <= 0:   # v34: 손절폭이 아주 큰 숏은 목표1이 0 아래(도달 불가) → 손절·보유 기한으로만 정리
+        out.append("목표1이 0 아래라 도달할 수 없어요 — 손절 주문만 걸고, 보유 기한이 되면 정리(과거 검증도 같은 방식)")
+    elif getattr(setup, "atr", 0) and setup.tp1:
         cb = trail_k * setup.atr / setup.tp1 * 100
         if frac <= 0:
-            out.append(f"진입 직후: 손절 주문 + 거래소 트레일링 주문(전량, 활성화 가격 = 목표1, 되돌림 {cb:.1f}%)을 미리 걸어두기")
+            out.append(f"진입 직후: 손절 주문 + 거래소 트레일링 주문(전량, 활성화 가격 = 목표1, 되돌림 {cb:.2f}%)을 미리 걸어두기 "
+                       "— 봉 마감마다 손으로 옮기는 것과 결과 비슷(15분봉 5년 시험)")
             out.append("목표1 도달 시: 익절하지 말고 손절 주문만 진입가로 옮기기(본전) — 이후는 트레일링 주문이 정리")
         else:
             out.append(f"목표1 도달 시: {int(frac * 100)}% 익절 → 남은 물량 손절을 진입가로 → "
@@ -256,7 +259,7 @@ PYRAMID_SIZE = 0.5     # v32.7: 목표1에 닿으면 처음 수량의 0.5배 추
 def pyramid_line(setup) -> Optional[str]:
     """불타기 안내(v32.7): 목표1에 처음 닿을 때 처음 수량의 0.5배 추가 — 추가분도 같은 추적 손절로 함께 정리."""
     e_, sl_, tp_ = getattr(setup, "entry_price", None), getattr(setup, "sl", None), getattr(setup, "tp1", None)
-    if not e_ or not sl_ or not tp_ or e_ == sl_:
+    if not e_ or not sl_ or not tp_ or e_ == sl_ or tp_ <= 0:
         return None
     from crypto_market_regime import SETUP_FAMILY, CHOP_FAMILIES, exit_of  # 지연 임포트
     if SETUP_FAMILY.get(getattr(setup, "bias", ""), "") not in CHOP_FAMILIES:
@@ -546,7 +549,7 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
         cell("현재가", fmt_price(setup.current_price)),
         cell(entry_label(setup), fmt_price(setup.entry_price)),
         cell("손절", fmt_price(setup.sl), "sl"),
-        cell(tp1_label(setup), fmt_price(setup.tp1), "tp"),
+        cell(tp1_label(setup), fmt_price(setup.tp1) if setup.tp1 > 0 else "도달 불가(0 아래)", "tp"),
         (cell("최대 보유", _hold_text(exit_of(setup)[2])) if exit_of(setup)[0] <= 0
          else cell("목표2(참고)", fmt_price(setup.tp2), "tp")),
         cell("손익비", f"{setup.rr_ratio:.2f}"),
@@ -583,6 +586,12 @@ def card_html(setup, sizing: Dict, risk_pct: float, over_limit: bool = False) ->
         warn += ('<div class="over">🗓 일요일 진입 — 5년 검증에서 일요일에 들어간 박스 돌파·되돌림·눌림목은 손절이 잦아'
                  '(72~76%, 다른 날 56~58%) 거래당 손해였어요. 조용한 일요일 변동폭으로 잡은 손절이 월요일 오전 변동성에 걸리기 쉬워 '
                  '리스크를 절반으로 계산했어요</div>')
+    if getattr(setup, "funding_half", False):   # v35
+        f3_ = getattr(setup, "funding_f3", None) or 0.0
+        side_ = "롱" if f3_ > 0 else "숏"
+        warn += (f'<div class="over">💸 펀딩 쏠림 — 최근 3일 펀딩이 연 {f3_ * 100:+.0f}%로 {side_} 쪽에 몰려 있어요. '
+                 '5년 검증에서 이렇게 쏠린 방향으로 들어간 거래는 성적이 크게 낮아(2021~23 −0.37R, 2024~ +0.05R · 쏠리지 않았을 때 '
+                 '+0.47R · +0.42R) 리스크를 절반으로 계산했어요</div>')
     if getattr(setup, "chop_half", False):
         warn += (f'<div class="over">🌊 시장 출렁임 지수 {getattr(setup, "chop_value", 0) or 0:.1f} (기준 52 초과) — 시장 전체가 방향 없이 출렁이는 구간이에요. '
                  '5년 검증에서 이런 때 박스 돌파·되돌림 성적이 크게 떨어져 리스크를 절반으로 계산했어요</div>')
@@ -837,7 +846,10 @@ def held_position_card(t: dict) -> tuple:
     rn = lv.get("R_now")
     lines = [f"진입 {p(lv['entry'])} → 마지막 4시간봉 종가 {p(lv['last_close'])}"
              + (f" (**{rn:+.2f}R**)" if rn is not None else "") + f" · 보유 {lv['held']}/{lv['hmax']}봉"]
-    if lv["stage"] == 0:
+    no_tp = lv.get("tp1") is not None and float(lv["tp1"]) <= 0     # v34: 목표1이 0 아래(손절폭이 아주 큰 숏) → 도달 불가
+    if lv["stage"] == 0 and no_tp:
+        lines.append(f"🛑 손절 {p(lv['sl'])} 그대로. 목표1이 0 아래라 도달할 수 없어요 — 손절이나 보유 기한({lv['hmax']}봉)으로만 정리")
+    elif lv["stage"] == 0:
         lines.append(f"🛑 손절 {p(lv['sl'])} 그대로. 목표1 {p(lv['tp1'])}에 닿으면 손절을 **진입가 {p(lv['entry'])}**로 올리기 "
                      "(트레일링 주문을 걸어 뒀다면 자동)")
     else:
@@ -845,7 +857,9 @@ def held_position_card(t: dict) -> tuple:
                      f"({'최고가 −' if long_ else '최저가 +'} {lv['trail']:g} ATR, 봉마다 유리한 쪽으로만 옮김). 트레일링 주문이 있으면 그대로 두기")
     pyr = lv.get("pyramid") or {}
     sz_ = pyr.get("size", 0.5)
-    if pyr.get("first_idx") is None:
+    if no_tp:
+        pass
+    elif pyr.get("first_idx") is None:
         lines.append(f"➕ 불타기: 목표1 {p(pyr.get('level'))}에 닿으면 처음 수량의 {sz_:g}배 추가 — 목표1 가격에 "
                      f"{'매수' if long_ else '매도'} 역지정가 주문을 걸어 두면 자동. 추가분도 같은 추적 손절로 함께 정리")
     elif pyr.get("now"):

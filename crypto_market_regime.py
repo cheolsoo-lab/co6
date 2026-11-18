@@ -42,7 +42,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-11-12 v33"          # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-11-18 v35"          # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -70,15 +70,31 @@ TRAIL_ATR = 2.5                                   # (예전 규칙) 나머지는
 # - hold: 최대 보유 봉 수 (4시간봉 30봉 = 5일, 60봉 = 10일)
 # v29 (5년·2021.10~2026.10, 사이클 A 2021-23 ↔ B 2024-26 교차 검증): 한 사이클에서 고른 설정이 다른 사이클에서도 통한 것만
 EXIT_RULES = {
-    "돌파": {"stop_atr": 0.5, "tp_box": 1.0, "frac": 0.0, "trail": 1.0, "hold": 60},
-    "돌파 후 되돌림": {"stop_atr": 0.0, "tp_box": 2.0, "frac": 0.0, "trail": 0.75, "hold": 60},
-    "추세 눌림목": {"stop_atr": 0.0, "tp_R": 4.0, "frac": 0.0, "trail": 0.75, "hold": 60},
+    # v34(2026-11-17 사용자 결정): 3종 청산 동시 조율(jt) — 추적 0.5 ATR, 눌림목 최대 보유 120봉. 손절폭·목표1 거리는 EXIT_TUNE
+    "돌파": {"stop_atr": 0.5, "tp_box": 1.0, "frac": 0.0, "trail": 0.5, "hold": 60},
+    "돌파 후 되돌림": {"stop_atr": 0.0, "tp_box": 2.0, "frac": 0.0, "trail": 0.5, "hold": 60},
+    "추세 눌림목": {"stop_atr": 0.0, "tp_R": 4.0, "frac": 0.0, "trail": 0.5, "hold": 120},
     "위치 다이버전스": {"stop_atr": 0.0, "tp_R": 3.0, "frac": 0.0, "trail": 0.75, "hold": 60},   # v29 기본 꺼짐(5년 교차 검증 탈락)
     "빗각 지지": {"stop_atr": 0.0, "tp_R": 5.0, "frac": 0.0, "trail": 1.5, "hold": 180},   # v31 시험 운용(손절 = 진입가 − 2 일봉 ATR)
     "아래꼬리 연속": {"stop_atr": 0.0, "tp_R": 5.0, "frac": 0.0, "trail": 3.0, "hold": 180},   # v32 시험 운용(손절 = 진입가 − 2 일봉 ATR)
     "스프링": {"stop_atr": 0.5, "tp_box": 2.0, "frac": 0.0, "trail": 0.75, "hold": 60},      # v33 👻 그림자 기록만
     "20/50 재교차": {"stop_atr": 0.5, "tp_R": 2.0, "frac": 0.0, "trail": 0.75, "hold": 60},   # v33 👻 그림자 기록만
 }
+# v34 🔧 3종 청산 조율 (사전 등록 jt_prereg.txt, 2026-11-17 · Bitget 선물 95개 코인 · 청산 480가지 × 3유형 동시 조율):
+#   위 기준(EXIT_RULES의 stop_atr·tp_box·tp_R, 최소 1 ATR)으로 구한 손절폭·목표1 거리를 진입가 기준으로 아래 배수만큼 바꿈.
+#   (손절폭 배수, 목표1 거리 배수) — 돌파 (0.75, 1.5) · 되돌림 (0.75, 0.75) · 눌림목 (0.75, 1.5), 추적은 모두 0.5 ATR.
+#   검증: 두 사이클(A 2021-10~2023 ↔ B 2024~) 서로 옮겨짐 · 고원(이웃 조합도 우위) · 계좌 좋아질 확률 92% ·
+#   Binance 못 본 기간(2020-01~2021-09)·슬리피지 3배도 통과. 현실 체결(아래 simulate_exits v34) 기준 위험 1% 계좌
+#   연 +46% → +57%(A), +78% → +109%(B). 대신 이긴 비율 37% → 25%, 최대 낙폭 −23% → −28%, 같은 위험이면 포지션 1.33배.
+#   더 좁히는 것(손절 0.4~0.6·추적 0.2)은 진입 직후 손절 급증·못 본 기간 악화로 근거 약함(rv1).
+EXIT_TUNE = {"돌파": (0.75, 1.5), "돌파 후 되돌림": (0.75, 0.75), "추세 눌림목": (0.75, 1.5)}
+# v34: 옛 청산(v33까지)이었다면 어땠을지 뒤에서 같이 기록 → 짝지은 기록 100건에서 한 번만 판단
+#   새 설정이 거래당 0.20R 넘게 뒤처지면 '되돌리기 제안'(백테스트만큼 좋다면 우연히 이렇게 될 확률 약 3%).
+OLD_EXIT = {"돌파": {"trail": 1.0, "hold": 60}, "돌파 후 되돌림": {"trail": 0.75, "hold": 60}, "추세 눌림목": {"trail": 0.75, "hold": 60}}
+OLD_EXIT_ON = True
+OLD_EXIT_TRACK_FILE = "old_exit_tracking.json"
+OLD_EXIT_REVIEW_N = 100
+OLD_EXIT_REVERT_R = -0.20
 # 새로 넣은 매매법은 위험 절반으로 시작 → 실전 추적 30건 평균이 플러스(기준선 안)면 자동으로 정상 위험
 NEW_FAMILY_RISK = {"돌파 후 되돌림": 0.5, "위치 다이버전스": 0.5}
 # v30.3: 승격 없이 고정하는 위험 비중. 추세 눌림목은 거래당 수익(+0.21~0.34R)이 박스 돌파·되돌림(+0.57~1.36R)보다 작아,
@@ -127,6 +143,15 @@ CHOP_N = 28
 CHOP_LIMIT = 52.0
 CHOP_RISK_MULT = 0.5
 CHOP_FAMILIES = SUNDAY_HALF_FAMILIES
+# v35 사용자 결정(2026-11-18): 펀딩 쏠림 위험 ½. 그 코인 Bitget 펀딩의 최근 3일 평균(8시간 기준으로 맞춰 연환산)이
+#   롱이면 +20% 초과, 숏이면 -20% 미만일 때 신규 진입 위험 ½ (사전 등록 ee_prereg.txt E4).
+#   검증(v34 3종 2,297건, Binance 펀딩): 쏠림 A -0.37R vs +0.47R · B +0.05R vs +0.42R, 코인 반쪽 둘 다, 월 묶음 부트스트랩 통과,
+#   별도 검토자 독립 재계산 같은 판정. 계좌(위험 1%) ½: A 연 +57→+62% · B +109→+110%. 아예 빼기는 결과가 흔들려 ½로 함.
+#   예전의 '현재 펀딩 연 20% 넘으면 제외'(검증 못 한 필터)는 이것으로 바꿈. 연구실·과거 신호 찾기에는 펀딩 기록이 없어 안 씀.
+FUNDING_CROWD = True
+FUNDING_CROWD_ANNUAL = 0.20
+FUNDING_CROWD_HOURS = 72
+FUNDING_CROWD_MULT = 0.5
 # v32.9: 추세 눌림목 × 코인 흔들림 상위 1/3 건너뛰기 (사용자 결정 2026-11-10, ct_prereg.txt)
 #   흔들림 = 4시간봉 84개(14일) 평균 진폭(ATR) ÷ 가격, 신호 봉 시각에 스캔한 코인끼리 순위.
 #   5년 재현: 6해 모두 나쁨(상위 1/3 −0.07R vs 나머지 +0.30R), 사이클 교차 계좌 같은 낙폭 A +57→+75% · B +83→+109%,
@@ -1336,6 +1361,9 @@ class CoinSetup:
     sunday_half: bool = False           # v32.1: 일요일 진입 — 위험 ½
     chop_half: bool = False             # v32.6: 시장 출렁임 지수 52 초과 — 위험 ½
     chop_value: Optional[float] = None  # v32.6: 신호 봉의 시장 출렁임 지수
+    funding_f3: Optional[float] = None  # v35: 신호 봉 마감까지 최근 3일 펀딩 평균(8시간 기준 연환산, 0.2 = 20%)
+    funding_crowd: bool = False         # v35: 내 방향으로 펀딩 쏠림(롱 > +20% · 숏 < -20%)
+    funding_half: bool = False          # v35: 펀딩 쏠림 — 위험 ½
     already_tracked: str = ""           # v30.2: 같은 코인·방향 추적 기록이 진행 중이면 그 설명
     opposite_tracked: str = ""          # v32.5: 같은 코인·반대 방향 추적 기록이 진행 중이면 그 설명 (코인당 한 포지션 → 새 추천 건너뜀)
     vol_skip: bool = False              # v32.9: 추세 눌림목 × 흔들림 상위 1/3 → 건너뜀
@@ -1542,6 +1570,38 @@ def funding_rate_ok(exchange_id: str, symbol: str, bias: str,
     if "short" in bias and annualized_pct < -max_annualized_pct:
         return False
     return True
+
+
+def funding_3d(exchange_id: str, symbol: str, at: Optional[pd.Timestamp] = None) -> Optional[float]:
+    """v35: at(UTC, 기본 지금)까지 최근 FUNDING_CROWD_HOURS시간 펀딩의 평균을 8시간 기준으로 맞춰 연환산(0.20 = 연 20%).
+    정산 주기(1·2·4·8시간)는 기록 사이 간격의 중앙값으로 판단. 기록이 3개 미만이거나 실패하면 None(쏠림 판정 안 함)."""
+    try:
+        ex = _get_ex(exchange_id)
+        ex.load_markets()
+        sw = symbol if ":" in symbol else f"{symbol}:{QUOTE}"
+        if sw not in ex.markets:
+            return None
+        at = pd.Timestamp(at) if at is not None else utc_now()
+        lo = at - pd.Timedelta(hours=FUNDING_CROWD_HOURS)
+        hist = ex.fetch_funding_rate_history(sw, since=int((lo - pd.Timedelta(hours=8)).timestamp() * 1000), limit=100)
+        rows = sorted((pd.Timestamp(h["timestamp"], unit="ms"), float(h["fundingRate"])) for h in (hist or [])
+                      if h.get("timestamp") is not None and h.get("fundingRate") is not None)
+        rows = [r for r in rows if lo < r[0] <= at]
+        if len(rows) < 3:
+            return None
+        gaps = [(b[0] - a[0]).total_seconds() / 3600 for a, b in zip(rows, rows[1:])]
+        ih = float(np.median(gaps)) if gaps else 8.0
+        ih = ih if 0.5 <= ih <= 8.0 else 8.0
+        return float(np.mean([r[1] for r in rows]) * (8.0 / ih) * 3 * 365)
+    except Exception:
+        return None
+
+
+def funding_crowded(f3: Optional[float], bias: str) -> bool:
+    """v35: 내 방향으로 펀딩이 쏠렸나 (롱 > +20%/연, 숏 < -20%/연)."""
+    if f3 is None or not FUNDING_CROWD:
+        return False
+    return f3 > FUNDING_CROWD_ANNUAL if bias in LONG_BIASES else f3 < -FUNDING_CROWD_ANNUAL
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> float:
@@ -2078,6 +2138,9 @@ def v27_levels(fam: str, direction: str, entry: float, ref: float, box_h: Option
     else:
         sd = abs(entry - sl)
         tp1 = entry + xr["tp_R"] * sd if long_side else entry - xr["tp_R"] * sd
+    if fam in EXIT_TUNE:   # v34: 진입가 기준으로 손절폭·목표1 거리 조율 (검증한 그대로: 기준 계산 뒤 배수)
+        ks, kt = EXIT_TUNE[fam]
+        sl, tp1 = entry - ks * (entry - sl), entry + kt * (tp1 - entry)
     return float(sl), float(tp1)
 
 
@@ -3262,6 +3325,42 @@ def shadow_tracking_summary(shadows: List[Dict]) -> Dict[str, Dict]:
     return out
 
 
+def build_old_exit_setups(setups: List["CoinSetup"]) -> List["CoinSetup"]:
+    """v34: 3종 추천을 v33까지의 청산(손절폭·목표1 거리 원래대로, 옛 추적·보유)으로 바꾼 복사본 — 비교 기록용, 진입 대상 아님."""
+    import copy as _copy
+    out = []
+    for x in setups:
+        fam = SETUP_FAMILY.get(x.bias, x.bias)
+        if fam not in EXIT_TUNE or not x.entry_price:
+            continue
+        ks, kt = EXIT_TUNE[fam]
+        y = _copy.copy(x)
+        e = float(x.entry_price)
+        y.sl, y.tp1 = e - (e - x.sl) / ks, e + (x.tp1 - e) / kt
+        y.exit_frac, y.exit_trail, y.max_hold = 0.0, OLD_EXIT[fam]["trail"], OLD_EXIT[fam]["hold"]
+        y.tags = list(x.tags)
+        out.append(y)
+    return out
+
+
+def old_exit_summary(tracks: List[Dict], olds: List[Dict]) -> Dict:
+    """v34: 같은 신호를 새 청산(실전 추적)과 옛 청산(비교 기록)으로 둘 다 끝난 것끼리 짝지어 비교. 100건에서 한 번 판단."""
+    done = lambda t: t.get("status") == "종료" and t.get("R") is not None
+    new = {t["key"]: t for t in tracks if done(t) and t.get("family") in EXIT_TUNE}
+    pairs = [(new[t["key"]]["R"], t["R"], t.get("family")) for t in olds if done(t) and t["key"] in new]
+    n = len(pairs)
+    out = {"n": n, "need": OLD_EXIT_REVIEW_N, "open_old": sum(1 for t in olds if t.get("status") in ACTIVE_TRACK),
+           "new_avg": float(np.mean([p[0] for p in pairs])) if n else None,
+           "old_avg": float(np.mean([p[1] for p in pairs])) if n else None,
+           "diff": float(np.mean([p[0] - p[1] for p in pairs])) if n else None,
+           "by_family": {f: (sum(1 for p in pairs if p[2] == f),
+                             float(np.mean([p[0] - p[1] for p in pairs if p[2] == f])) if any(p[2] == f for p in pairs) else None)
+                         for f in EXIT_TUNE}}
+    out["decision"] = (None if n < OLD_EXIT_REVIEW_N else
+                       ("되돌리기 제안" if out["diff"] < OLD_EXIT_REVERT_R else "새 청산 유지"))
+    return out
+
+
 def chop_text(info: Optional[Dict]) -> str:
     """화면 한 줄 설명"""
     if not info:
@@ -3462,7 +3561,7 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
             cands_ = ([setup] if setup else []) + extra
             if not cands_:
                 continue
-            spread, spread_done, fund_ok = None, False, {}
+            spread, spread_done, f3_cache = None, False, {}
             for setup in cands_:
                 fam = SETUP_FAMILY.get(setup.bias)
                 if FILTER_TAGS and fam in ("돌파", "신고점 돌파") and not FILTER_TAGS <= set(setup.tags):
@@ -3487,15 +3586,17 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
                     print(f"[skip] {symbol}: 스프레드 {spread:.2f}% — 슬리피지 위험으로 제외")
                     continue
 
-                side_ = "long" if setup.bias in LONG_BIASES else "short"
-                if side_ not in fund_ok:
-                    fund_ok[side_] = funding_rate_ok(fund_ex or exchange_id, info.get("perp") or symbol, setup.bias)
-                if not fund_ok[side_]:
-                    _rej("funding_hot")
-                    print(f"[skip] {symbol}: 펀딩비 과열 방향이라 제외 ({setup.bias})")
-                    continue
-
                 setup.signal_ts = setup.signal_ts or str(df["ts"].iloc[-1])   # v31: 일봉 신호는 그 일봉 마감 봉
+                # v35: 예전 '현재 펀딩 과열이면 제외' 대신, 최근 3일 펀딩 평균이 내 방향으로 쏠렸으면 위험 ½(아래 위험 배수 단계)
+                if FUNDING_CROWD:
+                    try:
+                        at_ = min(utc_now(), pd.Timestamp(setup.signal_ts) + pd.Timedelta(TIMEFRAME))
+                    except Exception:
+                        at_ = utc_now()
+                    if at_ not in f3_cache:
+                        f3_cache[at_] = funding_3d(fund_ex or exchange_id, info.get("perp") or symbol, at_)
+                    setup.funding_f3 = f3_cache[at_]
+                    setup.funding_crowd = funding_crowded(setup.funding_f3, setup.bias)
                 setup.bitget_perp = True if perps else None
                 setup.perp_symbol, setup.perp_mult = info.get("perp", ""), int(info.get("mult", 1))
                 setup.group = grp
@@ -3596,7 +3697,7 @@ _FILE_LOCK = threading.RLock()
 
 def cloud_files() -> List[str]:
     return [TRACK_FILE, LAB_REF_FILE, LAB_CONFIG_FILE, MACRO_VAL_FILE, TRADE_LOG_FILE, HISTORY_FILE, PORT_LOG_FILE,
-            LT_LOG_FILE, SKIP_TRACK_FILE, SHADOW_TRACK_FILE]
+            LT_LOG_FILE, SKIP_TRACK_FILE, SHADOW_TRACK_FILE, OLD_EXIT_TRACK_FILE]
 
 
 def _check_cloud_config(tok: Optional[str], gid: Optional[str]) -> Optional[str]:
@@ -3687,7 +3788,7 @@ def cloud_restore() -> str:
                 continue
             CLOUD["remote_hashes"][name] = _sha(remote)
             local = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
-            if path in (TRACK_FILE, SKIP_TRACK_FILE, SHADOW_TRACK_FILE) and local.strip():
+            if path in (TRACK_FILE, SKIP_TRACK_FILE, SHADOW_TRACK_FILE, OLD_EXIT_TRACK_FILE) and local.strip():
                 text = _merge_tracks(local, remote)
             elif path == PORT_LOG_FILE and local.strip():
                 text = _merge_port_log(local, remote)
@@ -3725,7 +3826,8 @@ def cloud_pull(min_interval: float = 120.0) -> str:
         files = _gist_files()
         n = 0
         for path, fn in ((TRACK_FILE, _merge_tracks), (PORT_LOG_FILE, _merge_port_log), (LT_LOG_FILE, _merge_lt_log),
-                         (SKIP_TRACK_FILE, _merge_tracks), (SHADOW_TRACK_FILE, _merge_tracks)):
+                         (SKIP_TRACK_FILE, _merge_tracks), (SHADOW_TRACK_FILE, _merge_tracks),
+                         (OLD_EXIT_TRACK_FILE, _merge_tracks)):
             name = os.path.basename(path)
             remote = files.get(name, "")
             if not remote.strip() or CLOUD["remote_hashes"].get(name) == _sha(remote):
@@ -3756,10 +3858,12 @@ def refresh_tracks(min_interval: float = 600.0, force: bool = False) -> str:
     tracks = load_tracks()
     skips = load_tracks(SKIP_TRACK_FILE)                   # v32.9: 건너뛴 눌림목 그림자 기록도 같이 갱신
     shadows = load_tracks(SHADOW_TRACK_FILE)               # v33: 👻 그림자 기록(스프링 · 20/50 재교차)도
+    olds = load_tracks(OLD_EXIT_TRACK_FILE)                # v34: 옛 청산 비교 기록도
     act_main = any(t["status"] in ACTIVE_TRACK for t in tracks)
     act_skip = any(t["status"] in ACTIVE_TRACK for t in skips)
     act_sh = any(t["status"] in ACTIVE_TRACK for t in shadows)
-    if not act_main and not act_skip and not act_sh:
+    act_old = any(t["status"] in ACTIVE_TRACK for t in olds)
+    if not act_main and not act_skip and not act_sh and not act_old:
         return "none"
     if act_main:
         update_tracks(tracks, LAST_LOADED)
@@ -3770,6 +3874,9 @@ def refresh_tracks(min_interval: float = 600.0, force: bool = False) -> str:
     if act_sh:
         update_tracks(shadows, LAST_LOADED)
         _save_tracks(shadows, SHADOW_TRACK_FILE)
+    if act_old:
+        update_tracks(olds, LAST_LOADED)
+        _save_tracks(olds, OLD_EXIT_TRACK_FILE)
     cloud_sync(force=True)
     return "updated"
 
@@ -3792,7 +3899,8 @@ def cloud_sync(force: bool = False, min_interval: float = 60.0) -> str:
         return "same"
     try:
         merge_fns = {TRACK_FILE: _merge_tracks, PORT_LOG_FILE: _merge_port_log, LT_LOG_FILE: _merge_lt_log,
-                     SKIP_TRACK_FILE: _merge_tracks, SHADOW_TRACK_FILE: _merge_tracks}
+                     SKIP_TRACK_FILE: _merge_tracks, SHADOW_TRACK_FILE: _merge_tracks,
+                     OLD_EXIT_TRACK_FILE: _merge_tracks}
         if any(p in changed for p in merge_fns):
             gfiles = _gist_files()
             for path, fn in merge_fns.items():
@@ -3885,7 +3993,10 @@ def track_new_setups(setups: List[CoinSetup], tracks: List[Dict], per_family: bo
                        # v27: 이 추천에 적용한 청산 규칙 (예전 기록에는 없음 → 예전 규칙으로 계산)
                        "frac": x.exit_frac, "trail": x.exit_trail, "hold": x.max_hold,
                        "perp": x.perp_symbol or "", "mult": int(x.perp_mult or 1),
-                       "risk_mult": float(getattr(x, "risk_mult", 1.0) or 1.0)})
+                       "risk_mult": float(getattr(x, "risk_mult", 1.0) or 1.0),
+                       # v35: 펀딩 쏠림 기록 (실전에서 쏠림 거래 성적을 따로 보기 위함)
+                       "funding_f3": (None if getattr(x, "funding_f3", None) is None else float(x.funding_f3)),
+                       "funding_crowd": bool(getattr(x, "funding_crowd", False))})
         active.add(sl_)
         added += 1
     return added
@@ -4308,6 +4419,9 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         if chm_ != 1.0:
             x.chop_half = True
             x.risk_mult *= chm_
+        if FUNDING_CROWD and getattr(x, "funding_crowd", False):   # v35: 펀딩 쏠림 위험 ½(사용자 결정)
+            x.funding_half = True
+            x.risk_mult *= FUNDING_CROWD_MULT
         x.vol_skip, x.vol_rank, x.vol_pct, x.vol_line = vol_skip_check(x, vol_info)   # v32.9
     skipped = [x for x in all_setups if x.vol_skip]            # v32.9: 추천에서 빼고 그림자 기록만
     all_setups = [x for x in all_setups if not x.vol_skip]
@@ -4365,6 +4479,14 @@ def run_analysis(risk_cfg: Optional[RiskConfig] = None, progress_cb=None) -> Dic
         _save_tracks(tracks)
     except Exception as e:
         print(f"[warn] 실전 추적 저장 실패: {e}")
+    if OLD_EXIT_ON:
+        try:  # v34: 같은 추천을 옛 청산(v33)으로 했다면 — 짝지어 비교하는 기록(진입 대상 아님)
+            olds = load_tracks(OLD_EXIT_TRACK_FILE)
+            update_tracks(olds, LAST_LOADED)
+            track_new_setups(build_old_exit_setups(setups + paused), olds)
+            _save_tracks(olds, OLD_EXIT_TRACK_FILE)
+        except Exception as e:
+            print(f"[warn] 옛 청산 비교 기록 저장 실패: {e}")
     try:  # v32.9: 건너뛴 눌림목은 따로 그림자 기록 (나중에 '건너뛴 게 맞았나' 확인)
         skips = load_tracks(SKIP_TRACK_FILE)
         update_tracks(skips, LAST_LOADED)
@@ -4642,10 +4764,14 @@ def simulate_exits(df: pd.DataFrame, signals: Dict[int, Dict], exit_mode: str = 
     - exit_mode="partial_trail": 목표1 절반 익절 → 남은 절반 본전 손절 → 최고/최저가에서 TRAIL_ATR×ATR 되돌리면 정리
     - exit_mode="fixed": 목표1에서 전량 청산 (비교용)
     - 같은 봉에서 손절·목표 동시 도달 시 손절 처리(보수적), 추적 손절선은 직전 봉까지 기준(미래 참조 방지)
+    - v34: 추적 손절 체결가 = min(추적선, 그 봉 시가)(숏은 max). 봉 마감 때 새로 올린 선이 이미 현재가 위에 있으면
+      실제로는 선 가격이 아니라 다음 봉 시가(≈ 직전 종가)에 나가게 됨 — 예전엔 항상 선 가격으로 계산해 거래당 R이
+      2024~ 기준 약 40% 높게 잡혔음(rv1·fillchk 2026-11-17)
     - 한 번에 하나의 포지션만"""
     slip = DEFAULT_SLIPPAGE_PCT if slip_pct is None else slip_pct
     maker, taker = MAKER_FEE_PCT, TAKER_FEE_PCT + slip
     lows, highs, closes = df["low"].to_numpy(), df["high"].to_numpy(), df["close"].to_numpy()
+    opens = df["open"].to_numpy()   # v34: 추적 손절이 봉 시작부터 이미 넘어가 있으면 그 봉 시가에 체결
     trades: List[Dict] = []
     pending: Optional[Dict] = None
     t: Optional[Dict] = None
@@ -4700,15 +4826,15 @@ def simulate_exits(df: pd.DataFrame, signals: Dict[int, Dict], exit_mode: str = 
                 if long_side:
                     t["stop"] = max(t["stop"], t["best"] - trail_ * t["atr"])
                     if lows[i] <= t["stop"]:
-                        _done(t["realized"] + _R(t["stop"], hold, rest, "stop"), i, "추적손절",
-                              t["realized_g"] + _G(t["stop"], rest)); t = None
+                        _done(t["realized"] + _R(min(t["stop"], opens[i]), hold, rest, "stop"), i, "추적손절",
+                              t["realized_g"] + _G(min(t["stop"], opens[i]), rest)); t = None
                     else:
                         t["best"] = max(t["best"], highs[i])
                 else:
                     t["stop"] = min(t["stop"], t["best"] + trail_ * t["atr"])
                     if highs[i] >= t["stop"]:
-                        _done(t["realized"] + _R(t["stop"], hold, rest, "stop"), i, "추적손절",
-                              t["realized_g"] + _G(t["stop"], rest)); t = None
+                        _done(t["realized"] + _R(max(t["stop"], opens[i]), hold, rest, "stop"), i, "추적손절",
+                              t["realized_g"] + _G(max(t["stop"], opens[i]), rest)); t = None
                     else:
                         t["best"] = min(t["best"], lows[i])
                 if t and hold >= hmax_:

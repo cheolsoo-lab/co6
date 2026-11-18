@@ -63,7 +63,7 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-11-12 v33"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
+APP_VERSION = "2026-11-18 v35"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
 st.title("▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
@@ -804,7 +804,7 @@ def recommendations() -> None:
         rare = " 돌파 신호는 원래 드물어서 비어 있는 날이 많아요. 아래 '돌파 임박 관찰'에서 곧 신호가 날 수 있는 코인을 확인하세요." \
             if set(fams) == {"돌파"} else ""
         st.info("**지금은 조건에 맞는 코인이 없어요.**\n\n"
-                "켜둔 신호 유형에서 손익비·상위추세·펀딩비·스프레드 조건을 모두 통과한 코인이 없다는 뜻입니다."
+                "켜둔 신호 유형에서 손익비·상위추세·스프레드 조건을 모두 통과한 코인이 없다는 뜻입니다."
                 f"{rare} 억지로 진입하지 않는 것도 전략이에요.")
     else:
         tab1, tab2 = st.tabs([f"✅ 진입 검토 ({len(ready)})", f"⏳ 대기 ({len(waiting)})"])
@@ -1314,6 +1314,46 @@ with st.expander(f"👻 그림자 기록 ({len(_shadows)}건 · 스프링 · 20/
                   for t in sorted(_shadows, key=lambda t: str(t["signal_ts"]), reverse=True)[:80]]
         st.dataframe(pd.DataFrame(rows_h), hide_index=True, use_container_width=True)
 
+# v35: 💸 펀딩 쏠림 실전 기록 — 쏠림(위험 ½) 추천과 나머지의 실전 성적을 따로 보여 줌
+if getattr(cmr, "FUNDING_CROWD", False):
+    _ft = [t for t in cmr.load_tracks() if "funding_crowd" in t]
+    _fc = [t for t in _ft if t.get("funding_crowd")]
+    with st.expander(f"💸 펀딩 쏠림 실전 기록 (쏠림 {len(_fc)}건 / v35 이후 {len(_ft)}건)"):
+        if not _ft:
+            st.caption("v35 이후 새 추천부터 신호 봉 마감까지 최근 3일 펀딩 평균을 함께 저장해요. 쏠림 = 롱인데 연 +20% 초과, 숏인데 연 −20% 미만.")
+        else:
+            def _fsum(xs):
+                done = [x["R"] for x in xs if x.get("status") == "종료" and x.get("R") is not None]
+                return f"{len(xs)}건(끝남 {len(done)}건" + (f", 평균 {sum(done) / len(done):+.2f}R)" if done else ")")
+            st.markdown(f"쏠림 **{_fsum(_fc)}** · 쏠리지 않음 {_fsum([t for t in _ft if not t.get('funding_crowd')])}")
+            st.caption("5년 검증(Binance 펀딩, v34 3종): 쏠림 2021~23 −0.37R · 2024~ +0.05R, 쏠리지 않음 +0.47R · +0.42R. "
+                       "실전 숫자는 건수가 적을 때 크게 흔들리니 참고만 하세요. 진입 대상 아님.")
+            bar_f = pd.Timedelta(cmr.TIMEFRAME)
+            rows_f = [{"코인": t["symbol"].split("/")[0], "방향": "롱" if t["direction"] == "long" else "숏",
+                       "신호 봉 마감(한국)": (pd.Timestamp(t["signal_ts"]) + bar_f + pd.Timedelta(hours=9)).strftime("%m-%d %H:%M"),
+                       "3일 펀딩(연)": (f"{t['funding_f3'] * 100:+.0f}%" if t.get("funding_f3") is not None else "—"),
+                       "쏠림": "예" if t.get("funding_crowd") else "", "상태": t["status"],
+                       "R": t.get("R") if t["status"] == "종료" else None}
+                      for t in sorted(_ft, key=lambda t: str(t["signal_ts"]), reverse=True)[:60]]
+            st.dataframe(pd.DataFrame(rows_f), hide_index=True, use_container_width=True)
+
+# v34: 🔁 청산 변경 확인 — 같은 추천을 옛 청산(v33)으로 했다면, 짝지어 100건에서 한 번 판단
+if getattr(cmr, "OLD_EXIT_ON", False):
+    _olds = cmr.load_tracks(cmr.OLD_EXIT_TRACK_FILE)
+    _oe = cmr.old_exit_summary(cmr.load_tracks(), _olds)
+    with st.expander(f"🔁 v34 청산 변경 확인 ({_oe['n']}/{_oe['need']}건 · 옛 청산이었다면)"):
+        if not _olds:
+            st.caption("아직 기록이 없어요. v34 이후 새 추천부터 옛 청산(손절폭·목표1 원래대로, 추적 1/0.75 ATR, 보유 60봉) 결과를 함께 쌓아요.")
+        else:
+            if _oe["n"]:
+                st.markdown(f"끝난 짝 **{_oe['n']}건**: 새 청산 평균 **{_oe['new_avg']:+.2f}R** · 옛 청산 평균 {_oe['old_avg']:+.2f}R · "
+                            f"차이 **{_oe['diff']:+.2f}R/거래**" + (f" → **{_oe['decision']}**" if _oe["decision"] else "")
+                            + f"  \n유형별: " + " · ".join(f"{f} {n}건" + (f" {d:+.2f}R" if d is not None else "")
+                                                         for f, (n, d) in _oe["by_family"].items()))
+            st.caption(f"옛 청산 기록 중 보유 {_oe['open_old']}건. 판단(미리 정함): 짝 {_oe['need']}건이 쌓이면 한 번만 봐서 새 청산이 "
+                       f"거래당 {abs(cmr.OLD_EXIT_REVERT_R):.2f}R 넘게 뒤처지면 '되돌리기 제안', 아니면 유지. 그 전에는 흔들림이 커서"
+                       "(30건이면 진짜로 나아도 나빠 보일 확률 약 35%) 숫자만 보고 바꾸지 않아요. 진입 대상 아님.")
+
 # v30.2: 추천받아 들어갔는데 추적에 안 보일 때 — 최근 3일 신호를 지금 규칙으로 다시 찾아 넣기
 with st.expander("🔧 추적에 안 보이는 추천 다시 찾기"):
     st.caption("들어간 코인 이름을 넣으면, 최근 3일(4시간봉 18개) 안에 켜둔 매매법 규칙으로 나왔던 신호를 Bitget 선물 차트로 다시 찾아요. "
@@ -1354,8 +1394,12 @@ with st.expander("📖 용어 / 사용법"):
         "- **진입(지정가)**: 이 가격에 지정가 주문을 걸어요. 시장가로 쫓아 들어가지 않는 게 핵심입니다.\n"
         "- **손절**: 이 가격에 닿으면 무조건 정리. 수량은 '손절 시 손실이 계좌의 리스크 %'가 되도록 계산돼 있어요.\n"
         "- **청산 계획(v29)**: 목표1(추적 시작)에 닿아도 팔지 않고 손절을 진입가로 올림 → 이후 최고가(롱)·최저가(숏)에서 "
-        "카드에 적힌 폭(박스 돌파 1 ATR, 되돌림·눌림목 0.75 ATR)만큼 되돌리면 전량 정리. 최대 보유 10일(60봉). "
-        "진입 직후 손절 주문과 트레일링 주문(활성화 가격 = 목표1)을 함께 걸어두면 돼요.\n"
+        "카드에 적힌 폭(v34: 세 유형 모두 0.5 ATR)만큼 되돌리면 전량 정리. 최대 보유 박스 돌파·되돌림 10일(60봉), 눌림목 20일(120봉). "
+        "진입 직후 손절 주문과 트레일링 주문(활성화 가격 = 목표1, 되돌림 % = 카드 값)을 함께 걸어두면 돼요 — "
+        "봉 마감마다 손절을 손으로 옮기는 것과 결과가 비슷했어요(15분봉 5년 시험).\n"
+        "- **🔧 v34 청산 조율**: 박스 돌파·되돌림·눌림목의 손절폭은 예전의 0.75배, 목표1(추적 시작)은 돌파·눌림목 1.5배 멀리·되돌림 0.75배 가깝게, "
+        "추적 0.5 ATR. 5년 검증에서 거래당 수익이 커진 대신 이기는 비율은 4건 중 1건 정도로 줄고 연패가 길어져요. "
+        "같은 위험이면 손절이 가까워 수량이 약 1.33배예요. 옛 청산이었다면 어땠을지 뒤에서 같이 기록해 100건에서 한 번 비교해요.\n"
         "- **➕ 불타기(v32.7)**: 박스 돌파·돌파 후 되돌림·추세 눌림목이 목표1에 처음 닿으면 처음 수량의 0.5배 추가. "
         "진입할 때 목표1 가격에 역지정가 주문을 같이 걸어 두면 돼요. 추가분도 같은 추적 손절로 함께 정리. "
         "5년 검증: 같은 최대 낙폭 연수익 전 신호 6/6·수동 6/6(두 번 통과), 거래당 +0.43 → +0.51R. 같은 개수를 무작위 시점에 넣으면 효과 없음.\n"
@@ -1367,6 +1411,11 @@ with st.expander("📖 용어 / 사용법"):
         "정확히 2번째 연속으로 마감 + BTC 일봉 종가가 200일 평균 위 + 코인 종가가 EMA20 위면 09시 시장가 롱(3번째 연속은 신호 아님). "
         "손절 = 진입가 − 2 일봉 ATR, 목표 5R 뒤 3 ATR(4시간봉) 추적, 최대 30일. 5년 사전 기준을 모두 통과했지만 새 매매법이라 위험 ¼로 시작, "
         "실전 30건 평균이 플러스면 0.5배로 승격.\n"
+        "- **💸 펀딩 쏠림 위험 ½(v35)**: 신호 봉 마감까지 그 코인 Bitget 펀딩의 최근 3일 평균(8시간 기준으로 맞춰 연환산)이 "
+        "롱인데 +20% 초과, 숏인데 −20% 미만이면 신규 진입 위험 ½. 남들이 이미 같은 쪽에 빚을 내 몰려 있으면 털리기 쉬움. "
+        "5년 검증(v34 3종 2,297건)에서 쏠림 거래 2021~23 −0.37R · 2024~ +0.05R(쏠리지 않음 +0.47R · +0.42R), 별도 검토자 재계산도 같은 판정. "
+        "예전 '현재 펀딩 연 20% 넘으면 제외'를 이것으로 바꿈(빼는 것보다 ½이 계좌 결과가 안정적). 같이 시험한 미결제약정 급증·CPI/FOMC 24시간 전 진입은 "
+        "통과 못 해 넣지 않음.\n"
         "- **🗓 일요일 진입(v32.1)**: 박스 돌파·돌파 후 되돌림·추세 눌림목 신호의 봉이 일요일(한국 시각)에 마감하면 위험 ½로 계산. "
         "5년 검증에서 일요일 진입만 3자료·두 사이클 모두 거래당 손해(손절 72~76%, 다른 날 56~58%). 사용자 결정으로 적용.\n"
         "- **🌊 시장 출렁임 위험 ½(v32.6)**: 스캔한 코인들의 4시간봉 Choppiness Index(28봉) 중앙값이 52를 넘으면 "
