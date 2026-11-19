@@ -9,6 +9,7 @@ app.py — 코인 추천 웹 화면 (핸드폰 우선)
 - v32.8: 전체 스캔은 서버 쪽 별도 작업으로 실행 → 폰 화면을 끄거나 다른 앱으로 가도 분석이 끊기지 않고 끝까지 진행
 ⚠️ 참고용 화면입니다. 자동 주문 기능은 없습니다.
 """
+import math
 import contextlib
 import dataclasses
 import io
@@ -63,7 +64,7 @@ def kst(ts) -> str:
     return (pd.Timestamp(ts) + pd.Timedelta(hours=9)).strftime("%H:%M")
 
 
-APP_VERSION = "2026-11-18 v35"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
+APP_VERSION = "2026-11-19 v35.1"    # 엔진(crypto_market_regime.APP_VERSION)과 항상 같은 값으로 올릴 것
 st.title("▲")
 _engine_ver = getattr(cmr, "APP_VERSION", None)
 st.caption(f"Bitget 선물용 · 스윙 신호 · 참고용(자동 주문 아님) · 버전 {APP_VERSION}")
@@ -1337,6 +1338,37 @@ if getattr(cmr, "FUNDING_CROWD", False):
                       for t in sorted(_ft, key=lambda t: str(t["signal_ts"]), reverse=True)[:60]]
             st.dataframe(pd.DataFrame(rows_f), hide_index=True, use_container_width=True)
 
+# v35.1: 🔄 30일 되돌림 전진 시험 — 규칙을 고정해 두고 앞으로의 결과로만 판정 (기록·표시만, 매매에 안 씀)
+with st.expander("🔄 30일 되돌림 전진 시험 (기록만 · 매매에 안 씀)"):
+    st.caption("ETF 이후 2024년엔 '지난 30일 흐름과 다음 30일 흐름이 반대'였지만 2025~26년엔 사라졌어요. 과거 자료로는 판단이 안 돼서 "
+               f"규칙을 고정해 두고 {cmr.REVERSAL_START}부터 매주 일요일(UTC) 기준으로 코인 10개({', '.join(cmr.REVERSAL_COINS)})의 결과만 모아 판정해요. "
+               f"판정: 기준일 {cmr.REVERSAL_WEEKS}개 결과가 다 나오면 한 번 — 합친 순위상관 ≤ {cmr.REVERSAL_IC_MAX} 이고 음수 코인 "
+               f"{cmr.REVERSAL_NEG_COINS}개 이상이면 '되돌림 확인'(그때 매매 규칙 후보로 따로 검증).")
+    _rk = "rev_" + str(pd.Timestamp.utcnow().date())
+    if st.button("현황 계산", key="rev_btn") or _rk in st.session_state:
+        try:
+            if _rk not in st.session_state:
+                with st.spinner("Bitget 일봉 받는 중…"):
+                    st.session_state[_rk] = cmr.reversal_forward_stats(cmr.EXCHANGES[0] if cmr.EXCHANGES else "bitget")
+            _rv = st.session_state[_rk]
+            if _rv["n_done"] == 0:
+                st.info(f"아직 결과가 나온 기록이 없어요. 첫 결과는 {_rv['first_result_at'].date()} 이후, 판정은 {_rv['verdict_at'].date()} 이후예요.")
+            else:
+                _ic = "—" if _rv["ic"] is None else f"{_rv['ic']:+.2f}"
+                _hit = "—" if _rv["hit"] is None else f"{_rv['hit']:.0%}"
+                st.markdown(f"**{_rv['status']}** · 결과 나온 기준일 {_rv['weeks_done']}/{cmr.REVERSAL_WEEKS}주 · 기록 {_rv['n_done']}개 · "
+                            f"합친 순위상관 {_ic} · 음수 코인 {_rv['neg_coins']}개 · 되돌림 적중 {_hit} · 판정 {_rv['verdict_at'].date()} 이후")
+                st.caption("판정 전 숫자는 참고만 하세요(독립 30일 구간이 적어 크게 흔들려요).")
+            if _rv["rows"]:
+                _df_rv = pd.DataFrame([{"기준일": r["base"].strftime("%Y-%m-%d"), "코인": r["coin"], "지난 30일": f"{(math.exp(r['past']) - 1) * 100:+.1f}%",
+                                        "다음 30일": ("—" if r["next"] is None else f"{(math.exp(r['next']) - 1) * 100:+.1f}%")}
+                                       for r in sorted(_rv["rows"], key=lambda r: (r["base"], r["coin"]), reverse=True)[:40]])
+                st.dataframe(_df_rv, hide_index=True, use_container_width=True)
+            if _rv["missing"]:
+                st.caption("Bitget에서 못 받은 코인: " + ", ".join(_rv["missing"]))
+        except Exception as e:
+            st.warning(f"되돌림 기록 계산 실패: {e}")
+
 # v34: 🔁 청산 변경 확인 — 같은 추천을 옛 청산(v33)으로 했다면, 짝지어 100건에서 한 번 판단
 if getattr(cmr, "OLD_EXIT_ON", False):
     _olds = cmr.load_tracks(cmr.OLD_EXIT_TRACK_FILE)
@@ -1411,6 +1443,10 @@ with st.expander("📖 용어 / 사용법"):
         "정확히 2번째 연속으로 마감 + BTC 일봉 종가가 200일 평균 위 + 코인 종가가 EMA20 위면 09시 시장가 롱(3번째 연속은 신호 아님). "
         "손절 = 진입가 − 2 일봉 ATR, 목표 5R 뒤 3 ATR(4시간봉) 추적, 최대 30일. 5년 사전 기준을 모두 통과했지만 새 매매법이라 위험 ¼로 시작, "
         "실전 30건 평균이 플러스면 0.5배로 승격.\n"
+        "- **🔄 30일 되돌림 전진 시험(v35.1)**: ETF 이후 '지난 30일과 다음 30일이 반대로 움직이는지'를 2026-11-22부터 매주 코인 10개로 기록해 "
+        "2027-06-16 이후 한 번 판정(규칙 고정). 기록·표시만, 매매에 안 씀. 펼침에서 '현황 계산'을 누르면 Bitget 일봉으로 계산.\n"
+        "- **BTC 매매 제외 이유**: 지금 3종 매매법을 BTC에도 적용해 5년 시험한 결과 BTC 거래 자체는 플러스(2021~23 +0.09R, 2024~ +0.64R)였지만 "
+        "계좌에 더하면 성장이 줄고(연 +57→+54%, +109→+93%) 2024~ 최대 낙폭이 −27.6→−35.2%로 깊어져 넣지 않음(동시 보유 자리를 차지하고 알트와 함께 움직임).\n"
         "- **💸 펀딩 쏠림 위험 ½(v35)**: 신호 봉 마감까지 그 코인 Bitget 펀딩의 최근 3일 평균(8시간 기준으로 맞춰 연환산)이 "
         "롱인데 +20% 초과, 숏인데 −20% 미만이면 신규 진입 위험 ½. 남들이 이미 같은 쪽에 빚을 내 몰려 있으면 털리기 쉬움. "
         "5년 검증(v34 3종 2,297건)에서 쏠림 거래 2021~23 −0.37R · 2024~ +0.05R(쏠리지 않음 +0.47R · +0.42R), 별도 검토자 재계산도 같은 판정. "

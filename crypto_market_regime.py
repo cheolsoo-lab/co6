@@ -42,7 +42,7 @@ except ImportError:
 # 0. 설정
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2026-11-18 v35"          # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
+APP_VERSION = "2026-11-19 v35.1"          # 화면·검증 결과에 표시 — 새 파일이 반영됐는지 확인용
 EXCHANGES = ["bitget", "okx", "binance"]          # 앞쪽일수록 우선 사용(Bitget = 실제 거래 거래소). 일부 거래소는 서버 지역에 따라 차단될 수 있음
 QUOTE = "USDT"
 TOP_N_BY_VOLUME = 100                             # 스캔 코인 수 = 합산 거래량 순위 상위 N개 (2년 검증: 1~100위 모든 구간 플러스)
@@ -1595,6 +1595,79 @@ def funding_3d(exchange_id: str, symbol: str, at: Optional[pd.Timestamp] = None)
         return float(np.mean([r[1] for r in rows]) * (8.0 / ih) * 3 * 365)
     except Exception:
         return None
+
+
+# v35.1: 'ETF 이후 30일 되돌림' 전진 시험 (사전 등록 rev_prereg.txt, 2026-11-19). 기록·표시만, 매매에 안 씀.
+REVERSAL_COINS = ("BTC", "ETH", "BNB", "XRP", "SOL", "ADA", "DOGE", "LINK", "LTC", "AVAX")
+REVERSAL_START = "2026-11-22"          # 첫 기준일(일요일, UTC). 이후 7일마다
+REVERSAL_WEEKS = 26                    # 기준일 26개 결과가 다 나오면(2027-06-15 이후) 한 번 판정
+REVERSAL_IC_MAX = -0.05                # 판정: 합친 순위상관 <= -0.05 그리고 음수 코인 6개 이상
+REVERSAL_NEG_COINS = 6
+
+
+def _spearman(a, b) -> Optional[float]:
+    a, b = pd.Series(a, dtype=float), pd.Series(b, dtype=float)
+    if len(a) < 3 or a.nunique() < 2 or b.nunique() < 2:
+        return None
+    return float(np.corrcoef(a.rank(), b.rank())[0, 1])
+
+
+def reversal_forward_stats(exchange_id: str = "bitget") -> Dict:
+    """v35.1: 30일 되돌림 전진 시험 현황. 지난 30일 vs 다음 30일 로그 수익(UTC 일봉 종가), 기준일 = 시작일부터 7일마다.
+    다음 30일이 끝난 기록만 셈. 판정은 기준일 REVERSAL_WEEKS개 결과가 다 나온 뒤 한 번(그 전 숫자는 참고)."""
+    ex = _get_ex(exchange_id)
+    ex.load_markets()
+    start = pd.Timestamp(REVERSAL_START)
+    today = utc_now().normalize()
+    bases = list(pd.date_range(start, start + pd.Timedelta(weeks=REVERSAL_WEEKS - 1), freq="7D"))
+    rows, missing = [], []
+    for b in REVERSAL_COINS:
+        sym = f"{b}/{QUOTE}:{QUOTE}"
+        if sym not in ex.markets:
+            missing.append(b)
+            continue
+        since, got = int((start - pd.Timedelta(days=35)).timestamp() * 1000), []
+        now_ms = int(utc_now().timestamp() * 1000)
+        for _ in range(12):
+            if since > now_ms:
+                break
+            try:
+                page = ex.fetch_ohlcv(sym, "1d", since=since, limit=90)
+            except Exception:
+                break
+            if not page:
+                break
+            got += page
+            if page[-1][0] < since:
+                break
+            since = page[-1][0] + 86_400_000
+        if not got:
+            missing.append(b)
+            continue
+        c = pd.Series({pd.Timestamp(r[0], unit="ms").normalize(): float(r[4]) for r in got}).sort_index()
+        c = c[c.index < today]                         # 완성된 일봉만
+        for d in bases:
+            p0, p1, p2 = c.get(d - pd.Timedelta(days=30)), c.get(d), c.get(d + pd.Timedelta(days=30))
+            if p0 and p1:
+                rows.append({"coin": b, "base": d, "past": float(np.log(p1 / p0)),
+                             "next": float(np.log(p2 / p1)) if p2 else None})
+    done = [r for r in rows if r["next"] is not None]
+    ic = _spearman([r["past"] for r in done], [r["next"] for r in done]) if done else None
+    per = {}
+    for b in REVERSAL_COINS:
+        v = [r for r in done if r["coin"] == b]
+        per[b] = _spearman([r["past"] for r in v], [r["next"] for r in v]) if len(v) >= 3 else None
+    neg = sum(1 for v in per.values() if v is not None and v < 0)
+    hit = (float(np.mean([np.sign(r["next"]) == -np.sign(r["past"]) for r in done if r["past"] != 0])) if done else None)
+    verdict_at = bases[-1] + pd.Timedelta(days=31)
+    weeks_done = len({r["base"] for r in done})
+    status = "판정 전"
+    if today >= verdict_at and weeks_done >= REVERSAL_WEEKS:
+        status = ("되돌림 확인 → 매매 규칙 후보로 별도 검증" if ic is not None and ic <= REVERSAL_IC_MAX and neg >= REVERSAL_NEG_COINS
+                  else "되돌림 없음 (시험 종료)")
+    return {"rows": rows, "n_done": len(done), "weeks_done": weeks_done, "ic": ic, "per_coin": per, "neg_coins": neg,
+            "hit": hit, "verdict_at": verdict_at, "first_result_at": start + pd.Timedelta(days=31), "status": status,
+            "missing": missing}
 
 
 def funding_crowded(f3: Optional[float], bias: str) -> bool:
@@ -3662,7 +3735,7 @@ def screen_market(market_regime: RegimeType, progress_cb=None,
         elif _REJ_SYM.get(sym):
             res_ = "제외: " + "·".join(dict.fromkeys(REJECT_LABELS.get(r, r) for r in _REJ_SYM[sym]))
         elif coin_group(sym) == "BTC":
-            res_ = "BTC는 시장 판단에만 사용"
+            res_ = "BTC는 시장 판단에만 사용 (3종 매매법을 BTC에도 적용하면 5년 계좌 성과가 나빠져 제외 — 2026-11-19 검증)"
         else:
             res_ = "신호 없음 (이번 봉에 조건을 만족한 매매법 없음)"
         if sym in watch_syms:
